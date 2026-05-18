@@ -1,6 +1,12 @@
 # Awesome Audio Knowledge Base
 
-![Audio Banner](https://via.placeholder.com/1200x300.png?text=Awesome+Audio+Knowledge+Base)
+> **全方位、深层次、实战化的音频技术开源知识库**
+>
+> 涵盖声学基础、数字信号处理、Android/Linux音频栈、车载音频、高通架构及行业标准。
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![Awesome](https://cdn.rawgit.com/sindresorhus/awesome/d7305f38d29fed78fa85652e3a63e154dd8e8829/media/badge.svg)](https://github.com/sindresorhus/awesome)
 
 欢迎来到 **Awesome Audio Knowledge Base**！这是一个致力于打造全网最全面、最专业、最体系化的音频技术开源知识库。
 
