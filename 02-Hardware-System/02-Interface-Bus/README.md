@@ -1,72 +1,67 @@
 # 数字音频接口与总线 (Digital Audio Interfaces & Bus)
 
-在音频硬件设计中，芯片与芯片之间（如 SoC 与 Codec 或 DSP）的音频数据传输主要通过特定的串行接口实现。最常见的包括 I2S, TDM 和 PDM.
+在音频 SoC 设计中，芯片间的数据交换（Inter-IC Communication）主要依赖以下几种串行总线。
 
 ---
 
-## 1. I2S (Inter-IC Sound)
+## 1. I2S (Inter-IC Sound) 详解
 
-I2S 是由飞利浦公司制定的最通用的音频总线标准，用于芯片间的 PCM 数据传输。
+I2S 是音频领域的行业标准。除了飞利浦定义的标准协议，实际工程中还有多种对齐格式。
 
-### 1.1 关键信号线
-*   **SCK (Serial Clock)**：串行时钟，也称 BCLK (Bit Clock)。每一位数据对应一个时钟脉冲。
-*   **WS (Word Select)**：字段选择，也称 LRCK (Left/Right Clock)。用于切换左右声道。
-    *   WS = 0：左声道数据。
-    *   WS = 1：右声道数据。
-*   **SD (Serial Data)**：串行数据线，用于传输二进制补码表示的音频数据。
+### 1.1 常见的四种格式
+1.  **I2S Phillips Standard**：MSB 在 LRCK 翻转后的第 2 个 BCLK 上升沿开始。
+2.  **Left Justified (左对齐)**：MSB 在 LRCK 翻转后的第 1 个 BCLK 上升沿立即开始。
+3.  **Right Justified (右对齐/EIAJ)**：数据在 LRCK 翻转前对齐，常用于部分旧式 DAC。
+4.  **DSP / PCM Mode**：LRCK 变成一个单周期的脉冲，后面连续跟多个声道的数据。
 
-### 1.2 I2S 标准时序
-*   数据在 SCK 的下降沿改变，在上升沿被读取。
-*   **关键特性**：MSB（最高有效位）在 WS 变化后的**第二个** SCK 上升沿开始传输（即延迟一个时钟周期）。
+### 1.2 主从模式 (Master vs Slave)
+*   **Master**：提供 BCLK 和 LRCK 的芯片。
+*   **Slave**：接收时钟并根据其节拍发送/接收数据。
+*   *经验*：系统设计中通常由 SoC 作为 Master，Codec 作为 Slave。
 
 ---
 
 ## 2. TDM (Time Division Multiplexing)
 
-当需要在一个物理接口上传输多于 2 个声道（如车载 8 声道、16 声道）时，通常使用 TDM。
+当需要在一个物理引脚上传输多于 2 个声道（如车机 8 声道、12 声道）时，TDM 是唯一选择。
 
-### 2.1 原理
-TDM 将一个帧的时间划分为多个时间片 (Slot)，每个时间片承载一个声道的数据。
-*   **SYNC (Frame Sync)**：帧同步信号，标志一帧的开始。
-*   **BCLK**：位时钟，频率比 I2S 更高，以容纳更多声道。
-
-```mermaid
-graph LR
-    subgraph "TDM Frame"
-        S1[Slot 1: CH1] --> S2[Slot 2: CH2]
-        S2 --> S3[...]
-        S3 --> Sn[Slot n: CHn]
-    end
-```
+### 2.1 槽位 (Slot) 与宽度
+*   一个 TDM 帧包含多个 Slot。
+*   **Slot Width**：通常为 32-bit，但实际 Data 可能是 16-bit 或 24-bit。
+*   **Bitclock 计算**：$BCLK = \text{SampleRate} \times \text{Slots} \times \text{SlotWidth}$。
+    *   *例*：48kHz, 8ch, 32bit -> $48000 \times 8 \times 32 = 12.288 \text{ MHz}$。
 
 ---
 
 ## 3. PDM (Pulse Density Modulation)
 
-PDM 是一种过采样技术，广泛用于 **数字 MEMS 麦克风**。
+PDM 是数字 MEMS 麦克风的标配接口。
 
-### 3.1 原理
-*   PDM 不传输 PCM 那样的量化数值，而是传输一串**只有 0 和 1** 的高频码流。
-*   **密度代表振幅**：1 的密度越大，代表模拟信号的瞬时幅度越高。
-*   **处理流程**：SoC 接收到 PDM 信号后，需要通过 **抽取滤波器 (Decimation Filter)** 将其转换为 PCM 信号。
+### 3.1 调制原理
+PDM 不传量化值，而是以极高的采样率（如 3.072MHz）传输 1 位码流。
+*   **密度 -> 振幅**：1 的密度越高，代表模拟波形幅度越大。
+
+### 3.2 SoC 侧的“抽取”处理 (Decimation)
+SoC 接收到 PDM 信号后不能直接混音，必须经过：
+1.  **CIC 滤波器**：降低采样率（抽取）。
+2.  **补偿滤波器**：修正频响。
+3.  **高通滤波器**：滤除直流分量。
+*最终转化为 16/24-bit 的 PCM 信号。*
 
 ---
 
-## 4. 接口对比 (Comparison)
+## 4. 新一代总线：SoundWire
 
-| 特性 | I2S | TDM | PDM |
-| :--- | :--- | :--- | :--- |
-| **主要用途** | 2 声道 PCM 传输 | 多通道 (4+) PCM 传输 | 数字麦克风接口 |
-| **信号线数** | 3 线 (SCK, WS, SD) | 3 线 (BCLK, FS, SD) | 2 线 (CLK, DATA) |
-| **复杂度** | 低 | 中 | 高 (需抽取滤波) |
+MIPI 联盟推出的 SoundWire 旨在替代 I2S 和 PDM。
+*   **优势**：支持在同一总线上挂载多个麦克风和扬声器，支持控制命令与数据并发，支持动态电源管理。
 
 ---
 
 ## 5. 关键参考 (References)
 
-1.  *I2S Bus Specification* - Philips Semiconductors
-2.  [Understanding PDM Digital Audio - Texas Instruments](https://www.ti.com/lit/an/slaa701/slaa701.pdf)
-3.  [TDM Audio Interface - STMicroelectronics](https://www.st.com/)
+1.  *I2S Bus Specification* - Philips
+2.  [Understanding Digital Audio Interfaces - TI](https://www.ti.com/lit/an/slaa701/slaa701.pdf)
+3.  [MIPI SoundWire Specification](https://www.mipi.org/specifications/soundwire)
 
 ---
 *Next Topic: [移动端与车载音频硬件架构 (Mobile & Automotive Audio Hardware)](../03-Mobile-Hardware.md)*

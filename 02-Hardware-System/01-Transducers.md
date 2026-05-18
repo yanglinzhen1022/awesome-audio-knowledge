@@ -6,67 +6,69 @@
 
 ## 1. 麦克风 (Microphone)
 
-麦克风根据工作原理主要分为动圈式和电容式.
+### 1.1 核心原理分类
+1.  **动圈式 (Dynamic)**：利用电磁感应。无需外部电源，耐用，但高频响应受限于振膜质量。
+2.  **电容式 (Condenser)**：利用极板间电容变化。灵敏度极高，需 **48V 幻象电源**。
+3.  **MEMS 麦克风**：目前智能手机的主流。
+    *   **封装**：集成微型机械振膜与 ASIC。
+    *   **接口**：模拟输出或数字 PDM 输出。
+    *   **关键指标 - SNR**：智能手机麦克风 SNR 通常在 64dB 到 74dB 之间。
 
-### 1.1 动圈式麦克风 (Dynamic Microphone)
-*   **原理**：基于**电磁感应**。声波推动振膜带动线圈在磁场中运动，产生感应电流。
-*   **特点**：结构坚固，无需电源（幻象电源），耐高声压，但灵敏度和高频响应稍逊。
-*   **应用**：舞台演出、KTV。
-
-### 1.2 电容式麦克风 (Condenser Microphone)
-*   **原理**：基于**电容电荷变化**。振膜作为电容器的一个极板，声波改变极板间距，导致电容值变化，从而产生电信号。
-*   **特点**：极其灵敏，频率响应宽且平坦，瞬态响应快，但需要 **48V 幻象电源 (Phantom Power)**。
-*   **应用**：专业录音室、广播。
-
-### 1.3 MEMS 麦克风 (Micro-Electro-Mechanical Systems)
-*   **特点**：体积微小，直接集成 CMOS 电路，一致性极好。
-*   **应用**：**智能手机**、耳机、穿戴设备。
-*   **输出形式**：模拟信号或数字信号 (PDM)。
+### 1.2 指向性 (Polar Patterns)
+专业开发中必须根据场景选择指向性：
+*   **全指向 (Omni)**：拾取所有方向，底噪低。
+*   **心形 (Cardioid)**：拾取前方，抑制后方，适合手机手持通话。
+*   **波束成形 (Beamforming)**：利用麦克风阵列 (Mic Array)，通过算法（如延迟求和）实现动态指向性。
 
 ---
 
 ## 2. 扬声器 (Speaker / Loudspeaker)
 
-### 2.1 动圈式扬声器 (Dynamic Loudspeaker)
-这是目前应用最广泛的扬声器类型。
-*   **结构**：由永久磁铁、音圈 (Voice Coil) 和振膜 (Diaphragm) 组成。
-*   **原理**：利用 **安培力**。电流通过位于磁场中的音圈，产生受力运动，带动振膜振动空气发声。
+### 2.1 物理构造与安培力
+扬声器的动力来自：$F = B \cdot I \cdot L$
+*   $B$：磁感应强度；$I$：电流；$L$：音圈导线长度。
 
-```mermaid
-graph TD
-    A[音频电流] --> B[音圈 Voice Coil]
-    subgraph "磁系统"
-        B
-        C[永久磁铁]
-    end
-    B --> D[振膜 Diaphragm]
-    D --> E[声波 Sound Wave]
-```
+### 2.2 T/S 参数 (Thiele/Small Parameters)
+这是评估扬声器单元物理性能的专业参数，直接决定了音箱箱体（或手机腔体）的设计：
+*   **Fs**：共振频率。扬声器在此时阻抗达到峰值。
+*   **Qts**：总品质因数。
+*   **Vas**：等效空气体积。
 
-### 2.2 扬声器核心指标
-*   **阻抗 (Impedance)**：常见为 4Ω, 8Ω, 32Ω。
-*   **灵敏度 (Sensitivity)**：给定 1W 功率在 1米处产生的声压级 (dB/W/m)。
-*   **频率响应 (Frequency Response)**：扬声器能有效回放的频率范围。
+### 2.3 扬声器保护：为何需要 SmartPA？
+手机扬声器由于体积微小且驱动电压高，面临两大风险：
+1.  **过热 (Over-temperature)**：直流电阻 $R_e$ 随温度升高，音圈烧毁。
+2.  **过冲 (Excursion Limit)**：振膜位移超过物理极限，产生物理损坏。
+*   **SmartPA 方案**：集成 **IV-Sense** 采样，实时计算实时阻抗 $Z = V / I$，并推算出音圈温度和位移，动态限制输出功率。
 
 ---
 
-## 3. 手机与车载硬件特有概念
+## 3. 车载专用硬件：A2B (Automotive Audio Bus)
 
-### 3.1 手机：SmartPA (智能功率放大器)
-*   **痛点**：手机扬声器体积微小，容易过热或过冲（超出行程）。
-*   **原理**：SmartPA 集成了**电流/电压反馈 (IV Sense)**。它实时监测扬声器的状态，通过算法在保护硬件的前提下，压榨出更大的音量和更好的低音。
+车载环境布线困难且重量敏感。
 
-### 3.2 车载：A2B (Automotive Audio Bus)
-*   **痛点**：传统车载音频线缆极重且布线复杂。
-*   **解决方案**：由 ADI 提出的数字音频总线。使用单根非屏蔽双绞线传输多通道 I2S/TDM 数据和控制信号，极大减轻了车身重量。
+### 3.1 核心特性
+*   **拓扑**：单主节点 (Master) + 最多 16 个从节点 (Slave)。
+*   **线缆**：单根 **UTP (非屏蔽双绞线)**。
+*   **同步性**：全系统纳秒级同步，非常适合 **ANC (主动降噪)**。
+
+### 3.2 A2B 发现与初始化流程
+```mermaid
+sequenceDiagram
+    participant Master
+    participant Slave1
+    participant Slave2
+    
+    Master->>Slave1: 设置 I2C 地址与配置
+    Slave1-->>Master: ACK
+    Master->>Slave1: 发起下游节点发现信号
+    Slave1->>Slave2: 激活偏置电压 (Bias)
+    Slave2-->>Master: 注册成功
+```
 
 ---
 
 ## 4. 关键参考 (References)
 
 1.  *Loudspeaker and Headphone Handbook* - John Borwick
-2.  [Microphone - Wikipedia](https://en.wikipedia.org/wiki/Microphone)
-3.  [A2B Technology - Analog Devices](https://www.analog.com/en/applications/technology-solutions/a2b-audio-bus.html)
-
----
-*Next Topic: [数字音频接口与总线 (Digital Audio Interfaces & Bus)](./02-Interface-Bus/README.md)*
+2.  [Thiele/Small Parameters - Wikipedia](https://en.wikipedia.org/wiki/Thiele/Small_parameters)
+3.  [Analog Devices A2B Technology](https://www.analog.com/en/applications/technology-solutions/a2b-audio-bus.html)

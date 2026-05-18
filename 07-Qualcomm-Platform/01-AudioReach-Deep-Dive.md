@@ -1,82 +1,65 @@
 # Qualcomm AudioReach 架构深度解析
 
-AudioReach 是高通 (Qualcomm) 推出的下一代音频驱动架构，旨在取代传统的 Elite 架构。它采用了更加模块化、可扩展的设计，极大地简化了复杂音频场景（如多声道、多音区）的开发。
+AudioReach 是高通 (Qualcomm) 推出的下一代音频驱动架构。它彻底抛弃了静态拓扑，转向了基于**图形 (Graph)** 的动态管理，是目前车载和旗舰手机音频开发者的必修课。
 
 ---
 
-## 1. 核心设计理念
+## 1. 从 ELITE 到 AudioReach 的演进
 
-AudioReach 的核心是将音频处理路径抽象为 **图形 (Graph)**。
-*   **灵活性**：开发者可以动态创建、连接或销毁音频处理节点，而无需重新编译内核。
-*   **跨平台**：统一了手机 (Mobile)、车机 (Automotive) 和计算 (Compute) 平台的音频驱动模型。
+*   **ELITE (Legacy)**：拓扑结构在编译时固定，修改一个模块需要重新烧录 DSP 固件。
+*   **AudioReach (Modern)**：支持动态运行时通过命令连接模块，极大地缩短了调试周期。
 
 ---
 
-## 2. 逻辑层级结构
+## 2. 关键对象模型
 
-AudioReach 的对象层级从大到小依次为：**Graph -> Subgraph -> Container -> Module**。
+1.  **Module (模块)**：最小算法单元（如 EQ, Gain）。每个模块有唯一的 **IID (Instance ID)**。
+2.  **Container (容器)**：模块的运行载体。定义了执行频率（同步/异步）和优先级。
+3.  **Subgraph (子图)**：逻辑功能的封装（如：USB 播放流）。
+4.  **Graph (图)**：由多个 Subgraph 连接而成的完整端到端链路。
 
 ```mermaid
-graph TD
-    subgraph "Graph (完整的音频功能)"
-        SG1[Subgraph 1: 播放流]
-        SG2[Subgraph 2: 设备端处理]
-        
-        subgraph "Subgraph 1"
-            C1[Container 1: 异步处理]
-            subgraph "Container 1"
-                M1[Module: Decoder]
-                M2[Module: Resampler]
-                M1 --> M2
-            end
-        end
-        
-        subgraph "Subgraph 2"
-            C2[Container 2: 同步处理]
-            subgraph "Container 2"
-                M3[Module: EQ]
-                M4[Module: Gain]
-                M3 --> M4
-            end
-        end
-        
-        SG1 --> SG2
+graph LR
+    subgraph "Subgraph: Host"
+        M_Dec[Decoder] --> M_SRC[Resampler]
     end
+    subgraph "Subgraph: Device"
+        M_EQ[Equalizer] --> M_Gain[Gain Control]
+    end
+    M_SRC -- Connection --> M_EQ
 ```
 
-### 2.1 模块 (Module)
-音频处理的最小单元（如：Gain, EQ, Mixer, I2S Sink）。每个模块都有唯一的 **Module ID**。
+---
 
-### 2.2 容器 (Container)
-模块的宿主。它定义了内部模块的运行环境，如：
-*   **优先级 (Priority)**
-*   **执行模式**：同步或异步。
-*   **内存池**。
+## 3. GPR (Graph Packet Router) 二进制协议
 
-### 2.3 子图 (Subgraph)
-一组逻辑相关的容器集合。一个 Subgraph 通常对应一个完整的音频功能块（如一个播放实例）。
+所有的控制逻辑（如：调音量）都是通过 GPR 数据包下发给 DSP 的。
+
+### 3.1 数据包结构 (伪结构体)
+```c
+struct gpr_packet_t {
+    uint16_t version;
+    uint16_t header_size;
+    uint16_t src_port;
+    uint16_t dst_port; // 目标 Subgraph/Module 地址
+    uint32_t token;    // 唯一标识，用于异步回调
+    uint32_t opcode;   // 操作码 (如: APM_CMD_GRAPH_OPEN)
+    uint8_t  payload[];
+};
+```
 
 ---
 
-## 3. GPR (Graph Packet Router)
+## 4. 实战：ADSP 性能监控
 
-GPR 是应用层（或系统层）与 AudioReach 交互的桥梁。
-*   所有的控制命令（如：调节音量、开启算法）都封装在 GPR 数据包中，发送给 DSP。
+在开发过程中，必须监控 DSP 的负载以防实时音频爆音。
 
----
-
-## 4. 图形化开发：QACT
-
-高通提供了 **QACT (Qualcomm Audio Configuration Tool)** 工具。
-*   开发者可以在 QACT 中以可视化连线的方式设计 AudioReach 图形。
-*   实时调试各模块的参数（如实时调整 EQ 曲线）。
+*   **查看 DSP 负荷**：使用高通 `adsp_perf` 或 `qcat` 实时查看每个 Container 的 CPU 占用。
+*   **PCM Dump**：通过 GPR 命令指定 Module 开启 Dump，将数据存入 `/data/vendor/audio/` 供离线分析。
 
 ---
 
 ## 5. 关键参考 (References)
 
-1.  [Qualcomm Developer Network - AudioReach](https://developer.qualcomm.com/)
-2.  Qualcomm AudioReach Documentation (Access restricted to QC customers)
-
----
-*Next Topic: [高通 ADSP 拓扑与调试](./02-ADSP-Topology.md)*
+1.  [Qualcomm AudioReach API Reference](https://developer.qualcomm.com/)
+2.  Qualcomm Hexagon DSP Architecture Whitepaper

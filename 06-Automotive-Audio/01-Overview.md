@@ -1,65 +1,65 @@
 # 车载音频系统概览 (Automotive Audio System Overview)
 
-车载音频系统已从单纯的“娱乐系统”演变为一个集成安全警报、语音交互、多音区娱乐及主动降噪的复杂分布式系统。在 Android Automotive (AAOS) 普及的今天，理解系统级的音频设计至关重要。
+车载音频系统比手机更强调**安全性、隔离性与实时性**。在 Android Automotive (AAOS) 架构中，音频不再由单个 App 控制，而是受全局车辆策略约束。
 
 ---
 
-## 1. 车载音频架构 (Automotive Architecture)
+## 1. AAOS 音频控制：CarAudioService
 
-与手机音频不同，车载音频需要处理来自 Android 系统、整车控制器 (MCU) 以及实时安全系统 (ADAS) 的多路音频流。
+在手机版 Android 中，`AudioService` 负责一切。在车机中，由 `CarAudioService` 接管并扩展了其功能。
 
-```mermaid
-graph TD
-    subgraph "Android Automotive OS (AAOS)"
-        Media[Media App]
-        Nav[Nav App]
-        AudioControl[CarAudioControl - ICarAudio]
-    end
+### 1.1 Context (音频上下文)
+AAOS 不直接操作 Usage，而是定义了 **Context**。每一个 Context 对应一类业务逻辑。
+*   **MUSIC**：音乐播放。
+*   **NAVIGATION**：导航播报。
+*   **VOICE_COMMAND**：语音助手。
+*   **CALL**：电话通话。
+*   **ALARM**：车辆报警音。
 
-    subgraph "Vehicle Subsystem"
-        VHAL[Vehicle HAL / Audio Control HAL]
-        MCU[Vehicle MCU - Safety/Chimes]
-        ExternalAmp[External DSP Amplifier]
-    end
+### 1.2 Context 与 Bus 的静态绑定
+在配置文件中，Context 被永久绑定到具体的硬件 Bus 上，这种设计保证了路由的**确定性**。
 
-    Media --> AudioControl
-    Nav --> AudioControl
-    AudioControl -- Control --> VHAL
-    VHAL -- Routing --> ExternalAmp
-    MCU -- Priority Audio --> ExternalAmp
-    ExternalAmp --> Speakers[Speakers Matrix]
+---
+
+## 2. 安全与直通路径 (Direct Path)
+
+由于汽车的特殊性，某些声音（如：倒车雷达、未系安全带警报）**绝对不允许延迟或静音**。
+
+### 2.1 硬件直通 (Safety Bypass)
+现代座舱设计中，关键报警音不经过 Android 系统，而是直接由 **MCU (微控制器)** 通过 I2S 或模拟线路直接输入到外部功放 (DSP Amp) 的混合节点。即使 Android 崩溃或正在冷启动，警报音也能即时响起。
+
+---
+
+## 3. 车载音频的核心指标
+
+*   **全双工性能**：在高速行驶（80km/h+）的高噪声环境下，实现清晰的语音通话。
+*   **分区隔离度**：驾驶员说话，后排语音助理不应被唤醒。
+*   **启动时间**：从车辆上电到第一声倒车雷达响起的延迟通常要求小于 **2 秒**。
+
+---
+
+## 4. 专家调试：car_audio_configuration.xml 解析
+
+```xml
+<!-- 关键配置片段 -->
+<audioZone id="0" isPrimary="true">
+    <volumeGroups>
+        <group>
+            <device address="bus0_media">
+                <context context="music"/>
+            </device>
+            <device address="bus1_navigation">
+                <context context="navigation"/>
+            </device>
+        </group>
+    </volumeGroups>
+</audioZone>
 ```
+*专家提示：通过 `adb shell dumpsys car_service` 可以查看当前系统中所有音区的 Bus 绑定状态。*
 
 ---
 
-## 2. 车载音频的核心差异 (Key Differences)
+## 5. 关键参考 (References)
 
-### 2.1 外部音频路由 (External Routing)
-手机的混音通常在 SoC 内部完成。而在汽车中，为了保证系统挂掉（如 Android 重启）时报警音（倒车雷达、转向灯）依然能响，混音和路由通常发生在**外部 DSP 功放**中。
-
-### 2.2 多音区 (Multi-zone Audio)
-汽车被划分为不同的听音区域（如：驾驶员位、副驾位、后排左/右）。系统需要支持：
-*   驾驶员听导航。
-*   后排乘客通过耳机看电影。
-*   各音区互不干扰。
-
-### 2.3 安全优先级 (Safety Priority)
-音频流按优先级排序，安全类音频（ADAS 预警）具有最高优先级，可以强行中断（Mute）或压低（Duck）正在播放的音乐。
-
----
-
-## 3. 车载音频控制逻辑：CarAudioService
-
-在 AAOS 中，`CarAudioService` 扩展了 Android 原生的音频管理功能：
-*   **音频上下文 (Audio Context)**：将 Usage 映射为车载特定的上下文（如：Music, Navigation, Voice_Command）。
-*   **静态路由配置**：通过 `car_audio_configuration.xml` 定义每个音区的硬件总线 (Bus)。
-
----
-
-## 4. 关键参考 (References)
-
-1.  [Android Open Source Project: Automotive Audio](https://source.android.com/devices/automotive/audio)
-2.  [AAOS Audio Control HAL Specification](https://source.android.com/devices/automotive/audio/audio-control-hal)
-
----
-*Next Topic: [车载多音区与路由策略](./02-Multi-zone-Routing.md)*
+1.  [Android Automotive Audio Official Guide](https://source.android.com/devices/automotive/audio)
+2.  [ISO 26262 - Functional Safety for Audio](https://www.iso.org/standard/43906.html)

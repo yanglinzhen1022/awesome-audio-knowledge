@@ -1,87 +1,67 @@
 # 数字音频基础 (Digital Audio Fundamentals)
 
-数字音频是将连续的模拟声波信号通过采样、量化和编码，转化为计算机可处理的离散二进制数据的过程。
+数字音频是将连续的模拟声波信号通过采样、量化和编码，转化为计算机可处理的离散二进制数据的过程。本章涵盖音频数字化过程中的数学边界与工程实践。
 
 ---
 
-## 1. 模拟到数字的转换 (ADC Process)
+## 1. 采样 (Sampling) 与 奈奎斯特定理
 
-模拟信号（电压变化）转换为数字信号主要包含三个步骤：
+采样是在时间轴上对信号进行离散化。
 
-1.  **采样 (Sampling)**：在时间轴上对信号进行离散化。
-2.  **量化 (Quantization)**：在幅度轴上对信号进行离散化。
-3.  **编码 (Encoding)**：将量化后的数值转化为二进制序列（如 PCM）。
-
-```mermaid
-graph LR
-    A[模拟音频信号] --> B[采样 Sampling]
-    B --> C[量化 Quantization]
-    C --> D[编码 Encoding]
-    D --> E[数字音频数据 PCM]
-```
+### 1.1 奈奎斯特-香农采样定理 (Nyquist-Shannon Theorem)
+*   **定理**：为了无失真地重建最高频率为 $f_{max}$ 的连续信号，采样率 $f_s$ 必须满足 $f_s > 2 f_{max}$。
+*   **混叠 (Aliasing)**：如果 $f_s \le 2 f_{max}$，高于奈奎斯特频率（$f_s/2$）的信号会“折返”回低频段，形成虚假信号。
+*   **工程实践**：CD 采样率选择 44.1kHz 是因为人耳上限为 20kHz，留出 4.1kHz 的**过渡带 (Guard Band)** 以便设计低成本的抗混叠低通滤波器。
 
 ---
 
-## 2. 采样率 (Sampling Rate)
+## 2. 量化 (Quantization) 与 位深
 
-### 2.1 奈奎斯特-香农采样定理 (Nyquist-Shannon Theorem)
-*   **定理内容**：为了能够无失真地重建原始模拟信号，采样频率 $f_s$ 必须大于信号最高频率 $f_{max}$ 的两倍。
-*   **公式**：$f_s > 2 \cdot f_{max}$
-*   **奈奎斯特频率**：$f_s / 2$ 称为奈奎斯特频率。如果信号频率超过此值，会产生 **混叠 (Aliasing)** 现象。
+量化是在幅度轴上对信号进行离散化。
 
-### 2.2 常见采样率
-*   **8kHz / 16kHz**：电话语音、语音识别（宽带/窄带语音）。
-*   **44.1kHz**：CD 标准。由于人耳上限是 20kHz，加上防混叠滤波器的过渡带，44.1kHz 是最经济的选择。
-*   **48kHz**：数字视频、电影音频标准。
-*   **96kHz / 192kHz**：Hi-Res 高解析度音频。
+### 2.1 SQNR (信号量化噪声比)
+量化过程必然产生误差（量化噪声）。对于 $N$ 位线性 PCM，其理论最大信噪比推导公式为：
+$$\text{SQNR} \approx 6.02N + 1.76 \text{ dB}$$
+*   **16-bit**：约 98 dB。
+*   **24-bit**：约 146 dB（已超过大多数模拟电路的动态范围）。
 
----
-
-## 3. 位深 (Bit Depth) 与 量化 (Quantization)
-
-### 3.1 位深 (Bit Depth)
-位深决定了每一个采样点能够表达的**精度**，直接影响**动态范围 (Dynamic Range)** 和 **信噪比 (SNR)**。
-*   **8-bit**：256 个量化层级。
-*   **16-bit**：65,536 个量化层级（CD 标准）。
-*   **24-bit**：专业录音标准。
-
-### 3.2 动态范围计算
-动态范围（dB）的近似计算公式：
-$$\text{Dynamic Range} \approx 6.02 \times N + 1.76 \text{ dB}$$
-*(其中 $N$ 为位深)*
-*   16-bit 约为 96dB。
-*   24-bit 约为 144dB。
-
-### 3.3 量化噪声与抖动 (Dithering)
-*   **量化噪声 (Quantization Noise)**：由于量化层级有限导致的舍入误差。
-*   **抖动 (Dithering)**：在量化前人为引入极微小的白噪声，目的是将由于量化导致的谐波失真转化为随机噪声，使听感更自然。
+### 2.2 抖动 (Dithering)：音频中的“玄学”数学
+*   **问题**：当信号幅度极小时（低位跳变），量化误差会产生与信号相关的“谐波失真”。
+*   **方案**：在量化前引入微量的随机白噪声。
+*   **效果**：虽然略微降低了 SNR，但将难听的“数码味”失真转化为了背景底噪，使听感更自然，能听到掩埋在量化层级以下的微弱细节。
 
 ---
 
-## 4. 码率 (Bitrate)
+## 3. PCM 数据结构与码率
 
-对于未压缩的 PCM 音频，码率计算公式为：
-$$\text{Bitrate} = \text{采样率} \times \text{位深} \times \text{通道数}$$
-*   **例子 (CD)**：$44,100 \times 16 \times 2 = 1,411,200 \text{ bps} \approx 1.4 \text{ Mbps}$
+### 3.1 原始 PCM 存储格式
+PCM (Pulse Code Modulation) 是音频数据的“生肉”。
+*   **对齐方式**：
+    *   **Little-endian**：Intel/Android/Windows 常用，低位在前。
+    *   **Big-endian**：部分网络协议使用。
+*   **布局**：
+    *   `Interleaved` (交织)：L R L R L R...
+    *   `Non-interleaved` (非交织)：LLLL... RRRR... (DSP 算法处理通常更喜欢这种模式，方便 SIMD 优化)。
 
----
-
-## 5. PCM 数据格式 (Pulse Code Modulation)
-
-PCM 是数字音频最原始、最通用的存储格式。
-
-*   **符号位**：通常是有符号数（Signed Integer），例如 16-bit PCM 的范围是 -32768 到 32767。
-*   **存储方式**：
-    *   **交织 (Interleaved)**：LRLRLR（左右声道交替存储，常见）。
-    *   **非交织 (Non-Interleaved / Planar)**：LLLL RRRR（左右声道分开存储）。
+### 3.2 码率计算公式
+$$\text{Bitrate (bps)} = \text{SampleRate} \times \text{BitDepth} \times \text{Channels}$$
+*   *例*：双声道 48kHz, 24bit PCM -> $48000 \times 24 \times 2 = 2.304 \text{ Mbps}$。
 
 ---
 
-## 6. 关键参考 (References)
+## 4. 常见音频术语解析
+
+*   **帧 (Frame)**：包含所有声道在同一个采样时刻的数据。例如，16bit 立体声，1 帧 = 4 bytes。
+*   **周期 (Period/Fragment)**：HAL 层一次处理的数据量。它是导致“音频延迟”的物理根源。
+*   **Jitter (时钟抖动)**：采样时间点的不稳定，会导致高频失真。
+
+---
+
+## 5. 关键参考 (References)
 
 1.  *Digital Audio Signal Processing* - Udo Zölzer
-2.  [Sampling (signal processing) - Wikipedia](https://en.wikipedia.org/wiki/Sampling_(signal_processing))
-3.  [The Science of Sample Rates - Xiph.org](https://xiph.org/video/vid2.shtml)
+2.  [The Science of Sample Rates - Xiph.org](https://xiph.org/video/vid2.shtml)
+3.  [Dither and Noise Shaping - Wikipedia](https://en.wikipedia.org/wiki/Dither)
 
 ---
 *Next Module: [02. 硬件系统 (Hardware System)](../02-Hardware-System/README.md)*

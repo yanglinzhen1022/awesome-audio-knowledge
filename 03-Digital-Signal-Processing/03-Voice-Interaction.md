@@ -1,65 +1,60 @@
 # 语音交互算法 (Voice Interaction: KWS, ASR, NLU, TTS)
 
-语音交互（语音助手）是音频技术与人工智能 (AI) 结合最紧密的领域。一个完整的语音交互回路包含从声音采集到语义理解再到语音合成的全过程。
+语音交互是音频、语言学与深度学习的交叉学科。本章解析将模拟语音转化为机器指令的核心算法流程。
 
 ---
 
-## 1. 语音交互全链路 (End-to-End Pipeline)
+## 1. 特征提取：从波形到频谱 (MFCC)
 
-```mermaid
-graph LR
-    User((用户)) -- 语音 --> FrontEnd[音频前端处理 3A/Beamforming]
-    FrontEnd --> KWS[唤醒词识别 KWS]
-    KWS --> ASR[语音识别 ASR]
-    ASR --> NLU[自然语言理解 NLU]
-    NLU --> DM[对话管理 / 逻辑处理]
-    DM --> TTS[语音合成 TTS]
-    TTS --> SPK[扬声器播放]
-```
+机器无法直接处理原始 PCM。MFCC (梅尔频率倒谱系数) 是目前最常用的语音特征。
+
+### 1.1 提取步骤
+1.  **预加重 (Pre-emphasis)**：高通滤波，平衡频谱，提升高频能量。
+2.  **分帧与加窗 (Framing & Windowing)**：通常 20-30ms 一帧，加汉明窗防止频谱泄露。
+3.  **FFT**：计算每帧的功率谱。
+4.  **Mel 滤波器组**：模拟人耳对频率的对数感知。
+5.  **离散余弦变换 (DCT)**：去除各频带间的相关性。
 
 ---
 
-## 2. 关键技术详解
+## 2. 语音前端的关键差异：VAD vs KWS
 
-### 2.1 语音活动检测 (VAD, Voice Activity Detection)
-*   **作用**：判断当前音频流中是否包含人类声音。
-*   **意义**：作为前端开关，节省后续 ASR/NLU 处理的功耗 and 计算资源。
+这是最容易混淆的两个概念：
 
-### 2.2 唤醒词识别 (KWS, Keyword Spotting)
-*   **特点**：通常在 DSP 或低功耗芯片上常驻运行 (Always-on)。
-*   **要求**：极低误报率、极低功耗。
-
-### 2.3 语音识别 (ASR, Automatic Speech Recognition)
-*   **功能**：将“语音波形”转换为“文本内容”。
-*   **核心模块**：特征提取 (MFCC/Fbank)、声学模型、语言模型。
-*   **趋势**：从传统的端到端模型 (E2E) 转向基于 Transformer/Conformer 的大模型。
-
-### 2.4 自然语言理解 (NLU, Natural Language Understanding)
-*   **功能**：理解文本背后的意图 (Intent) 和槽位 (Slot)。
-    *   *例子*：“帮我把空调调到 25 度” -> 意图：调节温度；槽位：25。
-
-### 2.5 语音合成 (TTS, Text-to-Speech)
-*   **功能**：将“文本”转换为“自然语音”。
-*   **评价标准**：自然度 (Prosody)、音质 (Quality)、实时率 (RTF)。
+| 特性 | VAD (语音活动检测) | KWS (唤醒词识别) |
+| :--- | :--- | :--- |
+| **主要目标** | 区分“人声”还是“环境噪声” | 识别特定的词（如“嘿 Siri”） |
+| **计算复杂度** | 极低，通常是基于能量或轻量级 CNN | 中等，需要比对特定声学特征 |
+| **运行位置** | 常驻硬件 (Always-on) 或 DSP 边缘 | 常驻 DSP |
 
 ---
 
-## 3. 车载与手机交互的差异
+## 3. 语音识别 (ASR) 的主流架构
 
-*   **车载 (Automotive)**：
-    *   **多音区识别**：需要区分是司机还是乘客在说话（依赖麦克风阵列波束成形）。
-    *   **离线化要求**：在隧道、地库等无信号区域，核心交互（如导航、空调控制）必须支持离线识别。
-*   **手机 (Mobile)**：
-    *   更强调极致的功耗管理。
-    *   更依赖云端大模型进行复杂逻辑处理。
+### 3.1 传统架构：HMM-DNN
+*   **声学模型**：DNN/CNN。
+*   **语言模型**：N-gram。
+*   **解码器**：加权有限状态转换器 (WFST)。
+
+### 3.2 现代架构：End-to-End (E2E)
+*   **CTC (Connectionist Temporal Classification)**：无需对齐。
+*   **LAS (Listen, Attend and Spell)**：基于注意力机制。
+*   **Transformer / Conformer**：目前工业界的 SOTA (State-of-the-art) 方案。
+
+---
+
+## 4. 自然语言理解 (NLU) 的核心：Slot Filling
+
+NLU 的目标是将文本结构化。
+*   **意图识别 (Intent)**：查询、控制、闲聊。
+*   **槽位填充 (Slot Filling)**：
+    *   *输入*：“帮我把 **空调** 调到 **26度**”
+    *   *输出*：Device="Air-conditioner", Value="26", Unit="Celsius"。
 
 ---
 
-## 4. 关键参考 (References)
+## 5. 关键参考 (References)
 
-1.  *Speech and Language Processing* - Dan Jurafsky & James H. Martin
-2.  [Google Speech-to-Text Documentation](https://cloud.google.com/speech-to-text)
-3.  [OpenAI Whisper (State-of-the-art ASR)](https://github.com/openai/whisper)
-
----
-*Next Module: [04. Android 音频架构 (Android Audio Stack)](../04-Android-Audio-Stack/README.md)*
+1.  *Speech and Language Processing* - Jurafsky & Martin
+2.  [Mel-frequency cepstrum - Wikipedia](https://en.wikipedia.org/wiki/Mel-frequency_cepstrum)
+3.  [OpenAI Whisper Architecture Blog](https://openai.com/research/whisper)
