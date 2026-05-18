@@ -140,4 +140,4 @@ sequenceDiagram
 3.  **音画同步 (Sync)**：在播放视频时，必须使用 `AudioTrack::getTimestamp`。这个时间戳来自硬件反馈，代表了声音真正从扬声器发出的时间，比系统 `uptimeMillis()` 准确得多。
 
 ---
-*下一章：[AudioRecord 录音全链路源码级剖析](./03-AudioRecord.md)*
+*下一章：[AudioRecord 录音流程解析](./04-AudioRecord.md)*

@@ -66,3 +66,6 @@ private class AudioHandler extends Handler {
 
 ---
 *下一章：[Android 音频系统概览 (Overview)](./02-Overview.md)*
+
+---
+*Next Topic: [AudioTrack 播放流程解析](./03-AudioTrack.md)*

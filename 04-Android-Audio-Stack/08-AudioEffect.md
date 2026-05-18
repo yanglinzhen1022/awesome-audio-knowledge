@@ -122,3 +122,6 @@ equalizer.setBandLevel((short)0, (short)500); // 提升低频
 
 ---
 *下一章：策略大脑 [AudioPolicy 路由管理与策略源码解析](../05-AudioPolicy/README.md)*
+
+---
+*下一章：[AudioFocus 音频焦点机制](./09-AudioFocus.md)*
