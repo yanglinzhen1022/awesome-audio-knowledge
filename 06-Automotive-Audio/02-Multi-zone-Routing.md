@@ -50,13 +50,12 @@ AAOS 通过 **Audio Zone** 来物理隔离车内空间。
 
 ## 3. 动态路由切换 (Dynamic Routing)
 
-当检测到状态变更（如用户手动在车机界面点击“声音仅驾驶员可见”）时，系统会触发动态路由。
+AAOS 支持 **CarAudioDynamicRouting** 机制，允许系统根据当前上下文（Context）实时调整音频流的终点。
 
-### 3.1 代码级实现路径
-1.  **CarAudioService** 接收到切换请求。
-2.  调用 `AudioPolicyManager::setDeviceConnectionState`。
-3.  **核心函数触发**：`getDeviceForStrategy()` 根据新的 `car_audio_configuration` 逻辑重新计算输出节点。
-4.  **底层执行**：Audio HAL 收到指令，修改 DSP 内部的交叉混音矩阵（Mix Matrix）。
+### 3.1 核心流程
+1.  **策略层**：`CarAudioService` 监测到用户偏好变化（如：切换到后排屏幕播放）。
+2.  **映射层**：根据 `AZID` 重新计算 `AudioAttributes` 与 `Bus` 的绑定关系。
+3.  **执行层**：通过 `AudioPolicyManager::setDeviceConnectionState` 触发底层路由刷新。
 
 ```mermaid
 sequenceDiagram

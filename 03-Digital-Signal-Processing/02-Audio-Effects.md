@@ -48,7 +48,20 @@ $$y_R(n) = x(n) * h_R(\theta, \phi, n)$$
 
 ---
 
-## 4. 关键参考 (References)
+## 4. Android 音效集成框架 (Effect Framework)
+
+在 Android 系统中，音效根据其作用位置被分为三个层级：
+
+1.  **Track Effects**：挂载在单个应用流上（如：均衡器只对播放器生效）。
+2.  **Stream Effects**：挂载在特定流类型上（如：全局压低所有的 Music 流）。
+3.  **Device Effects**：挂载在硬件出口（如：针对某个特定的扬声器进行的频率校准）。
+
+### 🚀 架构趋势：HAL 侧处理
+从 Android 13 开始，Google 推荐将绝大多数音效算法从 `AudioServer` 下沉到 `AudioHAL` 进程。这样可以利用厂商私有的 DSP 算力，降低主 CPU 功耗并减少延迟。
+
+---
+
+## 5. 关键参考 (References)
 
 1.  *Introduction to Sound Processing* - Davide Rocchesso
 2.  [The Biquad Cookbook - Robert Bristow-Johnson](https://chromium.googlesource.com/chromium/src/+/master/third_party/blink/renderer/platform/audio/Biquad.h)

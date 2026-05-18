@@ -68,14 +68,26 @@ graph TD
 
 ---
 
-## 3. 音频流的关键路径
+## 3. 进程隔离模型 (Process Isolation Model)
 
-1.  **控制流 (Control Flow)**：设置音量、切换路由。主要由 `AudioPolicyService` 处理。
-2.  **数据流 (Data Flow)**：音频 PCM 数据的传输。主要由 `AudioFlinger` 和共享内存 (Shared Memory) 处理。
+为了提高系统的安全性和稳定性，Android 将音频逻辑拆分到了四个核心进程中：
+
+1.  **APP 进程**：运行 Java API (`AudioTrack`) 和 JNI，通过 Binder 与 `audioserver` 交互。
+2.  **SystemServer 进程**：运行 `AudioService` (Java)，处理高层级策略、音量管理和音频焦点。
+3.  **AudioServer 进程 (核心)**：运行 `AudioFlinger` 和 `AudioPolicyService` (C++)。这是混音、重采样和策略决策的发生地。
+4.  **AudioHAL 进程**：硬件抽象层独立进程。将复杂的硬件驱动逻辑与框架解耦，崩溃时不会导致 `audioserver` 重启。
 
 ---
 
-## 4. 关键参考 (References)
+## 4. 车载场景下的特殊集成：CPMS 与 VHAL
+
+在 Android Automotive (AAOS) 中，音频栈需要与车辆电源管理紧密同步。
+*   **CarPowerManagementService (CPMS)**：监听车辆电源状态（如：上电、待机、关机）。
+*   **同步逻辑**：在车辆冷启动时，音频系统必须在“Wait for VHAL”阶段就绪，确保倒车雷达等安全音能第一时间响起。
+
+---
+
+## 5. 关键参考 (References)
 
 1.  [Android Open Source Project - Audio](https://source.android.com/devices/audio)
 2.  [Embedded Android - Karim Yaghmour](https://www.oreilly.com/library/view/embedded-android/9781449327958/)

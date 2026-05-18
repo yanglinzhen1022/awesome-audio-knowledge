@@ -62,7 +62,9 @@ $Sample_{out} = \text{clamp}(Sample_1 + Sample_2, \min, \max)$
 AudioFlinger 如何获取 App 的数据？通过 `Track` 对象和共享内存。
 
 *   **Track**：在 AudioFlinger 侧对应一个音频流实例。
-*   **Proxy**：一组辅助类（`AudioTrackClientProxy` 和 `AudioTrackServerProxy`），通过原子操作管理读写指针（sw_ptr, hw_ptr），保证 App 写入与 AudioFlinger 读取的同步。
+*   **Proxy**：一组辅助类（`AudioTrackClientProxy` 和 `AudioTrackServerProxy`）。
+    *   **AudioTrackClientProxy**：运行在 App 进程，负责申请 buffer 并通知 Server 端有新数据。
+    *   **AudioTrackServerProxy**：运行在 AudioFlinger 侧，负责从共享内存中“拾取”数据，并维护 `hw_ptr`。它通过原子操作管理读写指针（sw_ptr, hw_ptr），保证 App 写入与 AudioFlinger 读取的同步。
 
 ```mermaid
 graph LR

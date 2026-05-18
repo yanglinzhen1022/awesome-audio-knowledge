@@ -31,7 +31,20 @@ graph LR
 
 ---
 
-## 3. GPR (Graph Packet Router) 二进制协议
+## 3. 核心管理组件
+
+### 3.1 APM (Audio Processing Manager)
+运行在 DSP 上的核心服务，负责解析拓扑结构，创建、连接和管理上述所有 Subgraph 和 Module。
+
+### 3.2 ACDB (Audio Calibration Database)
+存储 Graph 的拓扑定义、连接关系以及每个 Module 的调试参数（Tuning Data）。开发者通过 QACT 工具生成的配置最终会写入 ACDB。
+
+### 3.3 GKV (Graph Key Vector)
+用于在 ACDB 中唯一标识一个 Graph 或 Subgraph 的键值对组合。系统通过比对 GKV 来加载正确的音频链路。
+
+---
+
+## 4. GPR (Graph Packet Router) 二进制协议
 
 所有的控制逻辑（如：调音量）都是通过 GPR 数据包下发给 DSP 的。
 
