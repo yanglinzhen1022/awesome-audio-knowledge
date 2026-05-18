@@ -21,5 +21,17 @@
     *   音量调节的底层“穿透”过程。
     *   **声场中心调节**：Fade (前后) 与 Balance (左右) 的计算逻辑。
 
+4.  **[主动降噪与路噪消除 (ANC & RNC)](./04-ANC-RNC.md)**
+    *   反相干涉基本原理与 FxLMS 自适应算法。
+    *   发动机阶次 ANC 系统架构与次级通路建模。
+    *   路噪消除 (RNC) MIMO 多通道架构与计算复杂度。
+    *   ESE 引擎声浪模拟与 ANC 协同。
+
+5.  **[AudioControl HAL 与 AAOS 架构演进](./05-AudioControl-HAL.md)**
+    *   AudioControl HAL AIDL 接口详解（Ducking / 焦点 / Fade&Balance）。
+    *   外部音源焦点管理 (IFocusListener) 机制。
+    *   AAOS 架构演进：分布式 → 域控集中 → 中央计算。
+    *   Hypervisor 多 OS 音频隔离与 Ethernet AVB/TSN。
+
 ---
 [返回主目录](../README.md)
