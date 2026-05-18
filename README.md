@@ -100,11 +100,11 @@ graph TD
 *   PulseAudio / PipeWire 简介
 
 ### [06. 车载音频系统 (Automotive Audio)](./06-Automotive-Audio)
-车载特有的复杂音频拓扑与逻辑。
-*   车载音频系统概述
-*   Android Automotive VHAL 与音频交互
-*   多音区系统设计 (Multi-zone Audio)
-*   复杂的音频路由策略 (Audio Routing)
+智能座舱多音区交互、安全优先级与复杂路由。
+*   车载音频概览与仲裁矩阵 (Arbitration Matrix)
+*   多音区 (Audio Zones) 与基于 Bus 的动态路由
+*   车载自定义焦点 (CarAudioFocus) 与音量组管理 (Volume Groups)
+*   Android Automotive VHAL 交互细节
 
 ### [07. 高通平台专题 (Qualcomm Platform)](./07-Qualcomm-Platform)
 深度解析高通平台的专有音频技术。

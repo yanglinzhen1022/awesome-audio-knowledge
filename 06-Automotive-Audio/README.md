@@ -1,19 +1,25 @@
 # 06. 车载音频系统 (Automotive Audio)
 
-本模块探讨车载环境下的音频系统设计，涵盖多音区管理、复杂的路由策略以及安全优先级控制。
+本模块深入探讨智能座舱环境下的系统级音频设计。不同于手机的垂直架构，车载音频是一个高度分布式、强调安全优先的复杂系统。
 
 ## 📖 章节导航
 
 1.  **[车载音频系统概览 (Overview)](./01-Overview.md)**
-    *   AAOS (Android Automotive) 音频架构。
-    *   外部路由 (External Routing) 与安全优先级。
-    *   车载特有的音频控制逻辑。
+    *   **仲裁矩阵 (Arbitration Matrix)**：P0 到 P4 的优先级定义与处理策略。
+    *   **VHAL 边界**：连接 Android 与底层 MCU/DSP 的桥梁。
+    *   域控架构与集中式架构的演进。
 
-2.  **[车载多音区与路由策略 (Multi-zone & Routing)](./02-Multi-zone-Routing.md)**
-    *   Audio Zone (音区) 划分：主音区与次级音区。
-    *   基于 Bus (总线地址) 的路由机制。
-    *   车载音频焦点 (Audio Focus) 与声音分层策略。
-    *   `car_audio_configuration.xml` 配置文件解析。
+2.  **[车载多音区、动态路由与 Bus 绑定](./02-Multi-zone-Routing.md)**
+    *   **Audio Zone (音区)**：物理隔离、Occupant Zone 乘员映射。
+    *   **Bus 路由机制**：为何弃用设备类型改用逻辑总线地址。
+    *   `car_audio_configuration.xml` 核心配置源码级解析。
+    *   动态切换路由的代码级实现路径。
+
+3.  **[车载音频焦点策略与音量组管理](./03-Focus-Volume-Management.md)**
+    *   **车载自定义焦点 (CarAudioFocus)**：冲突矩阵与处理模型。
+    *   **音量组 (Volume Groups)**：Context 到 Group 的映射逻辑。
+    *   音量调节的底层“穿透”过程。
+    *   **声场中心调节**：Fade (前后) 与 Balance (左右) 的计算逻辑。
 
 ---
 [返回主目录](../README.md)

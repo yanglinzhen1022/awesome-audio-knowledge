@@ -1,69 +1,89 @@
-# 车载多音区与路由策略 (Multi-zone & Routing Strategy)
+# 车载多音区、动态路由与 Bus 绑定
 
-在现代智能座舱中，音频系统必须具备“空间隔离”和“精准投送”的能力。多音区管理和灵活的路由策略是实现这一目标的关键。
-
----
-
-## 1. 多音区概念 (Audio Zones)
-
-Android Automotive (AAOS) 将车内空间划分为不同的 **Audio Zone**。
-
-*   **Primary Zone (主音区)**：通常指驾驶员和副驾驶区域。
-*   **Secondary Zones (次级音区)**：通常指后排座椅、甚至是第三排。
-*   **Occupant Zone (乘员区)**：AAOS 10 引入的概念，将音频与具体的乘员账号绑定。
+在智能座舱中，每一个“座位”都可以被看作一个独立的音频消费单元。为了实现这一目标，Android Automotive (AAOS) 引入了高度抽象且灵活的路由模型。
 
 ---
 
-## 2. 基于 Bus 的路由 (Bus-based Routing)
+## 1. 核心概念：音区 (Audio Zones)
 
-不同于手机使用设备类型（如 SPEAKER）路由，车载系统使用 **Bus (总线地址)** 进行路由。
+AAOS 通过 **Audio Zone** 来物理隔离车内空间。
 
-### 2.1 为什么使用 Bus？
-车载硬件通常有几十个扬声器，但 Android 核心只认识几种设备。通过将音频流发送到不同的物理总线（如 `bus0_music`, `bus1_nav`），外部 DSP 功放可以识别流的类型并将其路由到正确的扬声器。
+*   **Primary Zone (ID: 0)**：包含主驾和副驾。默认输出到车内音响系统。
+*   **Secondary Zones (ID: 1, 2...)**：通常指后排（左、右）。输出通常定向到后排头枕扬声器或蓝牙/有线耳机。
 
-```mermaid
-graph LR
-    subgraph "AAOS Logic"
-        Music[Media Stream] --> Bus0[Bus 0: Primary Zone]
-        Nav[Nav Stream] --> Bus1[Bus 1: Driver Only]
-        Game[Game Stream] --> Bus2[Bus 2: Rear Zone]
-    end
+### 🧠 🧠 专家深度：Occupant Zone 映射
+在多账号系统中，`OccupantZoneService` 会将“人”与“区”绑定。
+*   *场景*：当账号 A（登录在后排）启动音乐 App 时，系统会自动寻找与之绑定的 Audio Zone，并确保声音只从后排耳机传出。
 
-    subgraph "External DSP Amp"
-        Bus0 --> All_Spks[Full Cabin Speakers]
-        Bus1 --> Drv_Spk[Driver Headrest Spk]
-        Bus2 --> Rear_Spks[Rear Door Speakers]
-    end
+---
+
+## 2. 基于 Bus 的逻辑拓扑
+
+不同于手机只有扬声器（Speaker）和耳机（Headset），车机拥有几十个扬声器。Android 通过 **Bus (总线地址)** 来区分用途。
+
+### 2.1 物理绑定代码 (car_audio_configuration.xml)
+这是车载音频最核心的配置文件。
+
+```xml
+<audioConfiguration version="3">
+    <zones>
+        <zone name="primary zone" isPrimary="true" occupantZoneId="0">
+            <volumeGroups>
+                <group>
+                    <!-- 🚀 关键：定义 Bus 地址 -->
+                    <device address="bus0_media">
+                        <context context="music"/>
+                        <context context="game"/>
+                    </device>
+                    <device address="bus1_navigation">
+                        <context context="navigation"/>
+                        <context context="voice_command"/>
+                    </device>
+                </group>
+            </volumeGroups>
+        </zone>
+    </zones>
+</audioConfiguration>
 ```
 
 ---
 
-## 3. 路由策略与优先级
+## 3. 动态路由切换 (Dynamic Routing)
 
-### 3.1 焦点管理 (Audio Focus)
-车载系统通常会定制 `CarAudioFocus`。例如：
-*   **相互排斥**：正在听音乐时，如果开启紧急语音，音乐必须暂停。
-*   **并发播放 (Ducking)**：导航播报时，音乐音量自动压低而不停止。
+当检测到状态变更（如用户手动在车机界面点击“声音仅驾驶员可见”）时，系统会触发动态路由。
 
-### 3.2 声音分层
-1.  **Safety (安全级)**：ADAS 警报、雷达音（优先级最高，硬件级直通）。
-2.  **Communication (通信级)**：电话、语音助理。
-3.  **Entertainment (娱乐级)**：音乐、视频。
+### 3.1 代码级实现路径
+1.  **CarAudioService** 接收到切换请求。
+2.  调用 `AudioPolicyManager::setDeviceConnectionState`。
+3.  **核心函数触发**：`getDeviceForStrategy()` 根据新的 `car_audio_configuration` 逻辑重新计算输出节点。
+4.  **底层执行**：Audio HAL 收到指令，修改 DSP 内部的交叉混音矩阵（Mix Matrix）。
 
----
+```mermaid
+sequenceDiagram
+    participant User as 用户界面 (HMI)
+    participant CAS as CarAudioService
+    participant APM as AudioPolicyManager
+    participant HAL as Audio HAL
 
-## 4. 关键配置文件：car_audio_configuration.xml
-
-这个文件定义了 AAOS 如何将音区、总线和物理设备对应起来。
-*   **Zone 定义**：包含音区 ID。
-*   **Volume Group**：将多个总线组合在一起，实现统一的音量调节（如：媒体音量同时控制左/右声道）。
-
----
-
-## 5. 关键参考 (References)
-
-1.  [AOSP: Automotive Audio Control HAL](https://source.android.com/devices/automotive/audio/audio-control-hal)
-2.  [AAOS Audio Zones Management](https://source.android.com/devices/automotive/audio/zones)
+    User->>CAS: 设置“声音后移”
+    CAS->>APM: 更新 Zone 路由表
+    APM->>APM: 触发重新评估 (Check Routing)
+    APM->>HAL: setParameters("routing=bus2_rear")
+    HAL-->>User: 路由切换完成
+```
 
 ---
-*Next Module: [07. 高通平台专题 (Qualcomm Platform)](../07-Qualcomm-Platform/README.md)*
+
+## 4. 关键调试命令 (专家级)
+
+如果遇到声音路由错误，必须使用以下命令查看“真相”：
+
+*   **查看 Zone 绑定情况**：
+    `adb shell dumpsys car_service | grep -A 20 "CarAudioService"`
+*   **查看当前活跃流走的哪条 Bus**：
+    `adb shell dumpsys media.audio_policy | grep -A 10 "mOutputs"`
+*   **验证 HAL 是否收到请求**：
+    `adb logcat | grep -i "AudioControl"`
+
+---
+*Next Topic: [车载音频焦点策略与音量组管理](./03-Focus-Volume-Management.md)*
