@@ -1,67 +1,88 @@
 # AudioFlinger 混音引擎详解 (AudioFlinger Deep Dive)
 
-`AudioFlinger` 是 Android 音频系统服务的核心实现，运行在 `audioserver` 进程中。它是音频数据的“终点”（播放）和“起点”（录音）。
+`AudioFlinger` 是 Android 音频系统的“心脏”。它是一个典型的 **多线程、多任务、软硬结合** 的音频处理引擎。
 
 ---
 
-## 1. AudioFlinger 的核心职责
+## 1. 核心线程模型源码剖析
 
-1.  **管理播放和录音线程**：根据硬件输出设备创建不同的工作线程。
-2.  **混音 (Mixing)**：将多个 App 的音频流混合成一路发送给硬件。
-3.  **重采样 (Resampling)**：将不同采样率的音频流统一转换为硬件支持的采样率（通常为 48kHz）。
-4.  **音效处理**：管理全局或特定会话的音频特效。
+AudioFlinger 的核心工作是在一系列 `threadLoop` 中完成的。每一种音频输出设备或特殊路径都对应一个线程。
+
+### 1.1 PlaybackThread::threadLoop 伪代码
+所有播放线程的基类。它的工作逻辑是一个死循环：
+
+```cpp
+// 简化后的 threadLoop 核心逻辑 (Threads.cpp)
+bool AudioFlinger::PlaybackThread::threadLoop() {
+    while (!exitPending()) {
+        // 1. 等待混音信号 (例如：硬件缓冲区需要更多数据)
+        mWaitWorkCV.wait(mLock);
+
+        // 2. 处理配置变更 (如采样率切换、音效添加)
+        processConfigEvents_l();
+
+        // 3. 准备混音 (从 ActiveTracks 中获取数据)
+        // 🚀 专家点：这里会检查哪些 App 的 Track 已经写好了数据
+        prepareTracks_l();
+
+        // 4. 执行真正的混音 (AudioMixer)
+        // 如果有多个 App 在放歌，这里会将 PCM 数值进行叠加
+        mAudioMixer->process();
+
+        // 5. 将混音后的数据通过 HAL 写入硬件
+        mOutput->write(mSinkBuffer, mNormalFrameCount);
+    }
+}
+```
 
 ---
 
-## 2. 内部线程模型 (Thread Model)
+## 2. 混音器深度解析：AudioMixer
 
-AudioFlinger 为每个音频输出设备（Output Device）维护至少一个线程。
+`AudioMixer` 并不是简单的 $A + B$。它包含：
+*   **重采样 (Resampling)**：如果 App A 是 44.1k，App B 是 48k，它会先将 A 重采样为 48k。
+*   **音量控制 (Volume Scaling)**：应用淡入淡出、音量线性/对数转换。
+*   **格式转换**：如 24-bit 转 16-bit PCM。
+
+### 🧠 🧠 深度思考：饱和截断处理
+在叠加多个 PCM 信号时，如果数值超过了 16-bit 的范围（-32768 to 32767），会出现“炸音”。AudioMixer 内部使用了 **饱和算法 (Saturation)**：
+$Sample_{out} = \text{clamp}(Sample_1 + Sample_2, \min, \max)$
+而不是简单的自然溢出。
+
+---
+
+## 3. 低延迟的救星：FastMixer
+
+为了解决 Android 早期严重的音频延迟问题，Google 引入了 FastMixer。
+
+*   **普通 MixerThread**：工作周期通常是 20ms - 40ms，受 CPU 负载波动影响大。
+*   **FastMixer**：
+    *   运行在 **SCHED_FIFO** (实时优先级)。
+    *   周期极短（通常为 5ms）。
+    *   **绕过通用 AudioMixer**：它使用更精简、汇编优化的简单混音逻辑。
 
 ```mermaid
 graph TD
-    AF[AudioFlinger] --> PT[PlaybackThread]
-    AF --> RT[RecordThread]
+    App[Low Latency App] -- write --> SM((Shared Memory))
+    SM -- read --> FM[FastMixer Thread]
+    FM -- Direct Write --> HAL[Audio HAL]
     
-    PT --> MT[MixerThread - 通用混音]
-    PT --> DT[DirectOutputThread - 直接输出 / 压缩数据]
-    PT --> OT[OffloadThread - 硬解压缩流]
-    PT --> FM[FastMixer - 低延迟路径]
-```
-
-### 2.1 MixerThread (混音线程)
-最常用的线程。它包含一个 `AudioMixer` 对象。
-*   **工作循环**：等待数据 -> 混音 -> 处理音效 -> 写入 HAL。
-
-### 2.2 FastMixer
-为了解决 Android 早期严重的音频延迟问题而设计。它运行在更高的调度优先级，绕过复杂的混音逻辑，直接处理低延迟音频流。
-
----
-
-## 3. Track 与 PlaybackThread
-
-在 AudioFlinger 内部，每个应用创建的 AudioTrack 都对应一个 `Track` 对象。
-
-*   **Track**：应用数据的代理，持有共享内存。
-*   **ActiveTracks**：线程当前正在处理的 Track 集合。如果一个 Track 停止发送数据，它会从 ActiveTracks 中移除，以节省计算资源。
-
----
-
-## 4. 数据处理链路
-
-```mermaid
-graph LR
-    Track1[Track 1] --> Mixer
-    Track2[Track 2] --> Mixer
-    Mixer[AudioMixer] --> Effects[Audio Effects]
-    Effects --> HAL_Write[HAL::write]
+    style FM fill:#f96,stroke:#333,stroke-width:4px
 ```
 
 ---
 
-## 5. 关键参考 (References)
+## 4. 常见问题排查 (专家级)
 
-1.  [AOSP Source: AudioFlinger.cpp](https://android.googlesource.com/platform/frameworks/av/+/master/services/audioflinger/AudioFlinger.cpp)
-2.  [Android Audio Framework - Deep Dive](https://source.android.com/devices/audio/architecture)
+### 4.1 如何判断混音是否卡顿？
+观察 `adb shell dumpsys media.audio_flinger` 的输出。
+*   **Underruns (UR)**：如果这个数值在增加，说明 App 填充共享内存太慢，或者 MixerThread 调度太慢。
+*   **Thread Usage**：查看线程的 CPU 占用。如果接近 100%，则需要考虑开启 Offload（硬件卸载）。
+
+### 4.2 什么是 OffloadThread？
+当你在播放超长的 MP3 且电量较低时，AudioFlinger 会启动 `OffloadThread`。
+*   **逻辑**：它不进行混音，而是直接把压缩后的 MP3 数据推给 DSP。
+*   **目的**：让主 CPU 彻底休眠，由功耗极低的 DSP 完成解码，实现超长待机。
 
 ---
-*Next Topic: [AudioPolicy 策略管理详解](../05-AudioPolicy/README.md)*
+*下一章：策略大脑 [AudioPolicy 路由管理与策略源码解析](../05-AudioPolicy/README.md)*

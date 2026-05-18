@@ -1,67 +1,102 @@
 # AudioRecord 录音流程解析 (AudioRecord Deep Dive)
 
-`AudioRecord` 是 Android 应用层采集原始 PCM 音频数据的核心 API。它的实现逻辑与 `AudioTrack` 对称，但数据流向相反：从硬件到 AudioFlinger 再到应用。
+`AudioRecord` 是应用层获取原始音频数据的源头。对于初学者，它是“录音器”；对于专业人员，它是理解 **音频前端处理 (Preprocessing)、实时流传输、以及内核驱动采集** 的窗口。
 
 ---
 
-## 1. 核心概念：音频源 (AudioSource)
+## 1. 核心实战：实例化与 AudioSource 选择
 
-在创建 AudioRecord 时，必须指定 `AudioSource`。这决定了音频数据的来源以及系统会对其进行何种预处理。
+在 Android 中，录音的“意图”由 `AudioSource` 决定。这直接影响到底层 DSP 会加载什么样的算法模块。
 
-*   **MIC**：普通麦克风音频，不带特殊处理。
-*   **VOICE_COMMUNICATION**：语音通话模式。系统会自动开启 **3A 算法**（AEC, ANS, AGC）。
-*   **VOICE_RECOGNITION**：语音识别模式。旨在减少处理延迟，并关闭非线性的增强功能。
-*   **CAMCORDER**：摄像机模式。通常使用具有指向性的麦克风。
+```java
+// 专业录音配置示例
+int sampleRate = 16000; // 语音识别常用采样率
+int channelConfig = AudioFormat.CHANNEL_IN_MONO; // 单声道
+int audioFormat = AudioFormat.ENCODING_PCM_16BIT;
+
+int bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat);
+
+// 🚀 专家建议：如果是通话或交互，务必选择 VOICE_COMMUNICATION
+AudioRecord recorder = new AudioRecord(
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION, // 关键：开启底层 3A (AEC, ANS, AGC)
+        sampleRate,
+        channelConfig,
+        audioFormat,
+        bufferSize
+);
+```
+
+### 🧠 🧠 深度思考：VOICE_COMMUNICATION 的魔力
+当你选择这个 Source 时，`AudioPolicyService` 会识别出这是一个通话场景。它会自动向 `AudioFlinger` 发出指令，加载 **AEC (回声消除)** 和 **NS (降噪)** 的效果插件。如果硬件 DSP 支持这些算法，处理会发生在硬件层，极大地降低 CPU 负载。
 
 ---
 
-## 2. 录音数据流向 (Data Flow)
+## 2. JNI 与 Native 层的绑定
 
-与播放类似，录音也使用共享内存机制来保证数据传输效率。
+类似于 AudioTrack，`AudioRecord.cpp` 在 Native 层负责与 `audioserver` 进程交互。
 
-```mermaid
-sequenceDiagram
-    participant HAL as Audio HAL
-    participant AF as AudioFlinger (RecordThread)
-    participant SharedMem as Shared Memory
-    participant NativeRecord as Native AudioRecord (C++)
-    participant App as Java App
-
-    HAL->>AF: 原始 PCM 数据 (IStreamIn)
-    AF->>SharedMem: 写入消费者缓冲区 (ServerProxy)
-    SharedMem->>NativeRecord: 生产者缓冲区读取 (Proxy)
-    NativeRecord->>App: read() 方法返回数据
+```cpp
+// AudioRecord.cpp 核心逻辑展示
+status_t AudioRecord::set(...) {
+    // 1. 获取 AudioFlinger 代理
+    const sp<IAudioFlinger>& audioFlinger = AudioSystem::get_audio_flinger();
+    
+    // 2. 发起 Binder 调用请求创建 RecordTrack
+    sp<IAudioRecord> record = audioFlinger->openRecord(...);
+    
+    // 3. 获取录音专用的共享内存
+    mAudioRecordShared = record->getCblk();
+}
 ```
 
 ---
 
-## 3. 核心 API 工作逻辑
+## 3. 录音数据流：反向 Proxy 模型
 
-### 3.1 实例化与准备
-1.  调用 `new AudioRecord()`。
-2.  Native 层创建 `RecordTrack` 并与 AudioFlinger 建立 Binder 链接。
-3.  分配录音专用的共享内存。
+录音的数据流向与播放正好相反，但机制相同。
 
-### 3.2 录音循环
-应用通常启动一个独立的线程来执行以下操作：
-1.  `startRecording()`：通知 AudioFlinger 开始采集。
-2.  **死循环执行 `read()`**：这是一个阻塞调用。当共享内存中有足够数据时，它会将数据拷贝到应用提供的 byte 数组或 ByteBuffer 中。
-3.  数据处理：将 PCM 发送到网络或存储到文件（如 .wav）。
+*   **AudioFlinger (Producer)**：从 HAL 层读取 PCM 数据 -> 写入共享内存的 `ServerProxy` -> 更新写指针。
+*   **App (Consumer)**：调用 `read()` -> 从共享内存的 `Proxy` 读取数据 -> 更新读指针 -> 返回给 Java 层。
 
----
-
-## 4. 关键配置与优化
-
-*   **MinBufferSize**：必须使用 `getMinBufferSize()`。设置过小会导致实例化失败；设置过大虽然更稳定，但会增加数据返回给应用的延迟。
-*   **权限要求**：必须在 AndroidManifest 中声明 `RECORD_AUDIO`，且 Android 6.0+ 需要运行时动态申请。
-*   **10米外录音 (Privacy)**：当应用退到后台时，AudioRecord 通常会被系统静音（Silent），这是 Android 隐私保护机制的一部分。
+```mermaid
+graph RL
+    HAL[Audio HAL] -- 原始数据 --> RT[RecordThread in AudioFlinger]
+    RT -- write --> SM((Shared Memory))
+    SM -- read --> AR[Native AudioRecord in App]
+    AR -- return --> Java[AudioRecord.read]
+```
 
 ---
 
-## 5. 关键参考 (References)
+## 4. 源码级解析：read() 为什么是阻塞的？
 
-1.  [Android Developer: AudioRecord](https://developer.android.com/reference/android/media/AudioRecord)
-2.  [AOSP Source: AudioRecord.cpp](https://android.googlesource.com/platform/frameworks/av/+/master/media/libaudioclient/AudioRecord.cpp)
+当你调用 `recorder.read(buffer, 0, size)` 时，JNI 层会调用 Native 层的 `read()` 方法。
+
+```cpp
+// AudioRecord.cpp 简化逻辑
+ssize_t AudioRecord::read(void* buffer, size_t userSize, ...) {
+    // 1. 尝试从共享内存获取可用数据块
+    AudioRecordClientProxy::obtainBuffer(&audioBuffer, ...);
+    
+    // 2. 如果共享内存没数据，且没设置非阻塞标志，则进入等待 (Wait)
+    // 这是通过 pthread_cond_wait 或类似的同步机制实现的
+    if (no_data) {
+        mCblk->cv.wait(mLock); 
+    }
+    
+    // 3. 拷贝数据到应用缓冲区
+    memcpy(buffer, audioBuffer.mRaw, actualSize);
+}
+```
 
 ---
-*Next Topic: [AudioFlinger 混音引擎详解](./04-AudioFlinger/README.md)*
+
+## 5. 专家级调优与常见坑点
+
+1.  **数据丢失 (Overrun)**：如果应用层处理 `read()` 返回的数据太慢，共享内存会被写满，AudioFlinger 产生的数据没地方放就会被丢弃。
+    *   *方案*：在独立的高优先级线程中执行 `read()`，只负责把数据存入队列，不进行耗时逻辑处理。
+2.  **静音检测**：Android 10+ 引入了权限管理加强。如果应用进入后台，`read()` 依然能返回数据，但返回的全部是 **0 (静音数据)**。
+3.  **多客户端冲突**：某些低端硬件不支持多个 App 同时录音。当第二个 App 尝试 `startRecording()` 时，可能会抛出异常或导致第一个 App 被强行停止。
+
+---
+*下一章：音频心脏 [AudioFlinger 混音引擎源码深度解析](./04-AudioFlinger/README.md)*
