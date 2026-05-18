@@ -1,4 +1,4 @@
-# 11. 音频调试手册 (Audio Debug Cookbook)
+# 10. 音频调试手册 (Audio Debug Cookbook)
 
 本模块提供全链路音频调试的系统方法论与实战 Cookbook，涵盖从 App 层到硬件层的问题定位思路、工具使用与典型案例。
 

@@ -62,4 +62,4 @@ graph TD
 3.  [Microsoft Teams Audio Device Requirements](https://docs.microsoft.com/en-us/microsoftteams/devices/audio-devices)
 
 ---
-*Next Module: [12. 学习路径与资源 (Learning Path)](../12-Learning-Path-Resources/README.md)*
+*Next Module: [11. 学习路径与资源 (Learning Path)](../11-Learning-Path-Resources/README.md)*

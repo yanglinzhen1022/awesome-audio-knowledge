@@ -109,8 +109,8 @@ graph TD
 1.  **多听**：培养对音质的敏感度（什么是破音、底噪、回声）。
 2.  **多看**：阅读 AOSP 和 Linux Kernel 的音频源码。
 3.  **多动手**：买一块开发板（如 STM32, 树莓派），外接一个 Codec 跑通音频链路。
-4.  **多调试**：善用 `dumpsys`、`tinymix`、`Perfetto` 等工具（参见 [11-调试手册](../11-Audio-Debug-Cookbook/README.md)）。
-5.  **多串联**：理解全链路数据流（参见 [跨模块数据流](../11-Audio-Debug-Cookbook/02-Cross-Layer-Data-Flow.md)），避免只了解单层。
+4.  **多调试**：善用 `dumpsys`、`tinymix`、`Perfetto` 等工具（参见 [11-调试手册](../10-Audio-Debug-Cookbook/README.md)）。
+5.  **多串联**：理解全链路数据流（参见 [跨模块数据流](../10-Audio-Debug-Cookbook/02-Cross-Layer-Data-Flow.md)），避免只了解单层。
 
 ---
 *Next Topic: [音频开发资源与工具推荐](./02-Resources-Tools.md)*
