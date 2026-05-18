@@ -11,8 +11,10 @@
 
 2.  **[ASoC 驱动模型 (ASoC Driver Model)](./02-ASoC-Driver-Model.md)**
     *   三大核心组件：Codec, Platform, Machine 驱动。
-    *   DAPM (动态音频电源管理) 自动开关原理。
-    *   DAI (数字音频接口) 标准化。
+    *   **🆕 DAPM 深度解析**：Widget 完整分类、有向图寻路、Bias Level 状态机、电源序列、代码示例。
+    *   **🆕 FE/BE 与 DPCM**：Dynamic PCM 动态路由机制。
+    *   **🆕 DMA 传输机制**：环形缓冲区、Period/Buffer/延迟关系、驱动实现框架。
+    *   **🆕 Device Tree 音频节点**：simple-audio-card / 高通车载多链路 DTS 示例。
 
 3.  **[现代 Linux 音频服务 (PulseAudio & PipeWire)](./03-PulseAudio-PipeWire.md)**
     *   PulseAudio：桌面音频混音与网络透明性。
