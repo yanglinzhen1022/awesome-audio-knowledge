@@ -9,10 +9,11 @@
     *   MEMS 麦克风在移动设备中的应用。
     *   扬声器构造、安培力原理与核心性能指标。
 
-2.  **[数字音频接口与总线 (Interface & Bus)](./02-Interface-Bus/README.md)**
-    *   I2S 标准时序与信号线详解。
-    *   TDM 多通道时分复用技术。
-    *   PDM 脉冲密度调制与数字麦克风接口。
+2.  **[数字音频接口与总线 (Interface & Bus)](./02-Interface-Bus.md)**
+    *   I2S 信号线、四种格式、主从模式与 Linux ASoC 配置。
+    *   TDM 时分复用：Slot 映射、高通 DTS 配置。
+    *   PDM 脉冲密度调制：ΣΔ 原理、Decimation 链、DMIC 调试。
+    *   SoundWire：设备枚举、寄存器访问、Clock Stop 电源管理。
 
 3.  **[移动端音频硬件架构 (Mobile Audio)](./03-Mobile-Hardware.md)**
     *   手机音频典型拓扑与 ADSP。
