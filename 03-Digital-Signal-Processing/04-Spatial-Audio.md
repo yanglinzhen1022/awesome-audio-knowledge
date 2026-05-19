@@ -197,7 +197,162 @@ spatializer.addOnHeadTrackerAvailableListener(executor,
 
 ---
 
-## 8. 关键参考 (References)
+## 8. HRTF 渲染实现细节
+
+### 8.1 卷积实现
+
+```
+HRTF 渲染的核心 = FIR 滤波器卷积:
+
+  HRTF 滤波器长度: 128-512 tap (典型 256 @ 48kHz ≈ 5.3ms)
+  
+  时域直接卷积:
+    y[n] = Σ x[n-k] × h[k], k=0..N-1
+    复杂度: O(N×L) per frame (N=滤波器长, L=帧长)
+    
+  频域快速卷积 (Overlap-Save / Overlap-Add):
+    X = FFT(x)
+    H = FFT(h)  ← 预计算
+    Y = X × H   ← 逐频率复数乘
+    y = IFFT(Y)
+    复杂度: O(N×logN)
+    
+  实际实现选择:
+    滤波器 < 64 tap:  时域 (NEON 加速)
+    滤波器 > 64 tap:  频域 (分区卷积 Partitioned Convolution)
+    
+  分区卷积 (Uniformly Partitioned):
+    将长 HRTF 切成多个短分区 (如每段 128 点)
+    每帧只做一次短 FFT + 累加
+    → 延迟 = 1 个分区长 (如 128/48000 ≈ 2.67ms)
+    → 适合实时应用
+```
+
+### 8.2 HRTF 插值
+
+```
+问题: HRTF 数据库通常只有有限方向 (如 5° 间隔)
+     声源位置可能在两个测量点之间
+
+  插值方法:
+  
+    1. 最近邻 (Nearest Neighbor):
+       选择最近的测量方向 → 有明显"跳跃感"
+       
+    2. 线性插值 (Bilinear):
+       在方位角和仰角两维分别线性插值
+       → 简单高效, 大多数实现采用
+       
+    3. 球面加权插值 (VBAP-style):
+       找到包围三角形的 3 个测量点
+       → 按重心坐标加权平均
+       → 更平滑
+       
+    4. 频域幅度+相位分别插值:
+       幅度: 直接线性插值
+       相位: 使用最小相位分解 + ITD 分开插值
+       → 避免相位翻转导致的梳状滤波
+```
+
+### 8.3 高通平台空间音频实现
+
+```
+高通 Snapdragon Sound 空间音频:
+
+  ┌──────────────────────────────────────────────┐
+  │ App (Dolby Atmos / 360RA / 系统 Spatializer) │
+  │   → 输出多声道 PCM (5.1 / 7.1.4 / Object)  │
+  └──────────────────────────────────────────────┘
+           │
+           ▼
+  ┌──────────────────────────────────────────────┐
+  │ Android Spatializer Framework                │
+  │   → 调用 Spatializer Effect                 │
+  │   → 配置: 内容格式 / 设备类型 / 头追踪      │
+  └──────────────────────────────────────────────┘
+           │
+           ▼
+  ┌──────────────────────────────────────────────┐
+  │ ADSP SPF Graph:                             │
+  │   ├── Binaural Renderer Module              │
+  │   │     → HRTF 卷积 (频域分区)             │
+  │   │     → 房间反射模拟 (Early Reflections)  │
+  │   │     → 混响尾巴 (Late Reverb)           │
+  │   ├── Head Tracker Interface                │
+  │   │     → BT → IMU 数据 → 姿态融合         │
+  │   │     → 角度 → HRTF 选择                 │
+  │   └── Output: Stereo PCM → Codec DAC       │
+  └──────────────────────────────────────────────┘
+  
+  优势: ADSP 处理 → 低功耗, 低延迟
+  延迟: Head Tracking → Audio < 20ms
+```
+
+---
+
+## 9. 空间音频质量评估
+
+```
+空间音频主观评测维度:
+
+  ┌──────────────────────────────────────────────┐
+  │ 维度                    评分方法             │
+  ├──────────────────────────────────────────────┤
+  │ 定位精度 (Localization) MAA 最小可辨别角度   │
+  │ 空间感 (Envelopment)    宽度/包围感评分      │
+  │ 距离感 (Distance)       近/远源区分能力      │
+  │ 外部化 (Externalization) 声源在头外/头内     │
+  │ 前后混淆率              前后误判百分比       │
+  │ 音质 (Timbral Quality)  频响着色/失真       │
+  │ 头追踪响应             转头时声场稳定性      │
+  └──────────────────────────────────────────────┘
+  
+  行业标准测试:
+    - ITU-R BS.1534 (MUSHRA): 多刺激隐蔽参考
+    - ITU-R BS.1116: 小损伤分级
+    - Localization 测试: 声源方位判断 + 混淆率统计
+    
+  典型性能指标:
+    水平面定位精度:  ±5° (正前方) / ±15° (侧面)
+    前后混淆率:     < 10% (好的个性化 HRTF)
+    Motion-to-Sound: < 30ms (合格) / < 15ms (优秀)
+```
+
+---
+
+## 10. 常见空间音频调试
+
+```bash
+# === Android Spatializer 状态 ===
+adb shell dumpsys media.audio_flinger | grep -i spatial
+adb shell dumpsys audio | grep -iE "spatial|head.track"
+
+# 检查 Spatializer 是否启用
+adb shell dumpsys audio | grep "Spatializer"
+#   Spatializer: enabled=true, available=true
+#   HeadTracker: connected=true, available=true
+
+# 检查输出格式是否支持空间化
+adb shell dumpsys media.audio_policy | grep -i "spatializ"
+
+# === 高通 ADSP 空间音频 Graph ===
+adb shell cat /proc/asound/card0/agm_dump | grep -i spatial
+
+# === 常见问题 ===
+# 空间感不明显:
+#   → 检查输出是否为 Stereo (需要 5.1+ 输入)
+#   → 检查 HRTF 是否加载
+#   → 检查 setEnabled(true) 是否调用
+
+# 转头延迟大:
+#   → 检查 BT 传输延迟 (APTX Adaptive < AAC < SBC)
+#   → 检查 IMU 数据率 (需要 > 100Hz)
+#   → 检查 ADSP processing block size
+```
+
+---
+
+## 11. 关键参考 (References)
 
 1.  *3D Audio* - Rozenn Nicol (Springer)
 2.  [MIT KEMAR HRTF Dataset](https://sound.media.mit.edu/resources/KEMAR.html)
@@ -205,3 +360,5 @@ spatializer.addOnHeadTrackerAvailableListener(executor,
 4.  [Ambisonics - Wikipedia](https://en.wikipedia.org/wiki/Ambisonics)
 5.  [Apple Spatial Audio Overview](https://developer.apple.com/spatial-audio/)
 6.  [Android Spatializer API](https://developer.android.com/reference/android/media/Spatializer)
+7.  [SADIE II HRTF Database](https://www.york.ac.uk/sadie-project/database.html)
+8.  [Qualcomm Snapdragon Sound - Spatial Audio](https://www.qualcomm.com/products/features/snapdragon-sound)

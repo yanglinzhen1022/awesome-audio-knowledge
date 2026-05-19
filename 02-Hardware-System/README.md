@@ -26,9 +26,16 @@
 
 5.  **[编解码器与智能功放 (Audio Codec & SmartPA)](./05-Codec-SmartPA.md)**
     *   Codec 功能模块与主流芯片（WCD938x、CS系列、ALC系列）。
-    *   SmartPA IV-Sense 闭环保护原理。
-    *   音质增强算法：低频补偿、热补偿、非线性校正。
-    *   Codec vs SmartPA 职责划分与驱动集成。
+    *   SmartPA IV-Sense 闭环保护原理与调参流程。
+    *   WCD938x 寄存器操作实战与调试命令。
+    *   高通平台 IV-Sense 数据通路。
+
+6.  **[USB 音频 (USB Audio)](./06-USB-Audio.md)**
+    *   USB Audio Class 协议（UAC 1.0/2.0/3.0）与描述符结构。
+    *   等时传输模式：同步/自适应/异步（Feedback）。
+    *   Linux snd-usb-audio 驱动架构与 URB 数据流。
+    *   Android USB Audio HAL 与设备连接流程。
+    *   USB Type-C 音频（模拟/数字模式）。
 
 ---
 [返回主目录](../README.md)

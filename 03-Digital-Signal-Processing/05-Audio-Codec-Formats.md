@@ -41,9 +41,31 @@
 IETF 开放标准，目前公认最先进的通用音频编解码器。
 
 ```
-编码模式自动切换：
-  语音 (SILK 内核) ←→ 混合模式 ←→ 音乐 (CELT 内核)
-  低码率 6kbps         中码率           高码率 510kbps
+Opus 内部架构:
+
+  输入 PCM
+    │
+    ▼
+  ┌────────────────────────────────────────────┐
+  │ Opus Encoder                               │
+  │                                            │
+  │  ┌─────────┐  ┌──────────┐  ┌──────────┐  │
+  │  │  SILK   │  │  Hybrid  │  │   CELT   │  │
+  │  │(语音核心)│  │(混合模式)│  │(音乐核心)│  │
+  │  │ 6-20kbps│  │ 20-64kbps│  │ 64-510kbps│ │
+  │  │ NB/WB   │  │ SWB      │  │ FB       │  │
+  │  └─────────┘  └──────────┘  └──────────┘  │
+  │       ↑              ↑            ↑        │
+  │       └──── 自动切换 (基于内容检测) ────┘   │
+  └────────────────────────────────────────────┘
+    │
+    ▼
+  Opus Bitstream (OGG/WebM/RTP 封装)
+
+  帧长选择:
+    2.5ms / 5ms / 10ms / 20ms / 40ms / 60ms
+    通话场景: 20ms (低延迟)
+    音乐场景: 60ms (高压缩效率)
 ```
 
 *   **延迟**：最低 2.5ms（业界最低之一）
@@ -190,7 +212,208 @@ graph TD
 
 ---
 
-## 7. 关键参考 (References)
+## 7. Android MediaCodec 编解码集成
+
+### 7.1 Android 编解码框架架构
+
+```
+Android 音频编解码栈:
+
+  App (MediaPlayer / ExoPlayer / AudioTrack)
+    │
+    ▼
+  MediaCodec API (Java / NDK)
+    │
+    ▼
+  ACodec / CCodec (Codec2)    ← Android 10+ 推荐 Codec2
+    │
+    ├── Software Codec (CPU):
+    │     libopus.so / libFLAC.so / libAAC.so
+    │     → 通用兼容，CPU 开销大
+    │
+    └── Hardware Codec (DSP/HW):
+          vendor 提供 (如高通 DSP AAC Offload)
+          → 低功耗，但支持格式有限
+          
+  选择逻辑:
+    MediaCodec.createDecoderByType("audio/opus")
+      → 系统查 media_codecs.xml
+      → 优先选择 HW codec, 若不可用 fallback 到 SW
+```
+
+### 7.2 MediaCodec 编解码代码示例
+
+```java
+// === 使用 MediaCodec 解码 AAC ===
+MediaExtractor extractor = new MediaExtractor();
+extractor.setDataSource(audioFilePath);
+
+// 找到音频 track
+int audioTrack = -1;
+for (int i = 0; i < extractor.getTrackCount(); i++) {
+    MediaFormat format = extractor.getTrackFormat(i);
+    String mime = format.getString(MediaFormat.KEY_MIME);
+    if (mime.startsWith("audio/")) {
+        audioTrack = i;
+        break;
+    }
+}
+extractor.selectTrack(audioTrack);
+
+// 创建解码器
+MediaFormat format = extractor.getTrackFormat(audioTrack);
+MediaCodec decoder = MediaCodec.createDecoderByType(
+    format.getString(MediaFormat.KEY_MIME));
+decoder.configure(format, null, null, 0);
+decoder.start();
+
+// 异步解码循环 (简化)
+while (!eos) {
+    // 送入编码数据
+    int inIdx = decoder.dequeueInputBuffer(10000);
+    if (inIdx >= 0) {
+        ByteBuffer inBuf = decoder.getInputBuffer(inIdx);
+        int sampleSize = extractor.readSampleData(inBuf, 0);
+        if (sampleSize < 0) {
+            decoder.queueInputBuffer(inIdx, 0, 0, 0,
+                MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+            eos = true;
+        } else {
+            decoder.queueInputBuffer(inIdx, 0, sampleSize,
+                extractor.getSampleTime(), 0);
+            extractor.advance();
+        }
+    }
+    
+    // 取出 PCM 数据
+    MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+    int outIdx = decoder.dequeueOutputBuffer(info, 10000);
+    if (outIdx >= 0) {
+        ByteBuffer outBuf = decoder.getOutputBuffer(outIdx);
+        // outBuf 中是解码后的 PCM 数据 → 写入 AudioTrack
+        audioTrack.write(outBuf, info.size, AudioTrack.WRITE_BLOCKING);
+        decoder.releaseOutputBuffer(outIdx, false);
+    }
+}
+```
+
+```java
+// === 使用 MediaCodec 编码 Opus (录音压缩) ===
+MediaFormat encFormat = MediaFormat.createAudioFormat(
+    MediaFormat.MIMETYPE_AUDIO_OPUS, 48000, 1);
+encFormat.setInteger(MediaFormat.KEY_BIT_RATE, 64000);
+encFormat.setInteger(MediaFormat.KEY_COMPLEXITY, 5);
+
+MediaCodec encoder = MediaCodec.createEncoderByType(
+    MediaFormat.MIMETYPE_AUDIO_OPUS);
+encoder.configure(encFormat, null, null,
+    MediaCodec.CONFIGURE_FLAG_ENCODE);
+encoder.start();
+// 然后将 AudioRecord 的 PCM 数据送入 encoder...
+```
+
+---
+
+## 8. 硬件编解码 Offload
+
+### 8.1 Offload 播放原理
+
+```
+Offload 播放 = 将编解码从 AP CPU 卸载到 DSP:
+
+  普通播放:
+    App → MediaCodec (CPU 解码) → PCM → AudioFlinger → HAL → DAC
+    CPU 持续工作, 功耗高
+    
+  Offload 播放:
+    App → 压缩数据 → AudioFlinger → Compress Offload HAL → DSP 解码 → DAC
+    AP 可以 suspend! 功耗极低
+    
+  ┌─────────────────────────────────────────────┐
+  │ Normal Path (CPU decode)                    │
+  │ App → [CPU: AAC→PCM] → AF → HAL → DAC      │
+  │ CPU: 活跃, 功耗 ~50mW+                     │
+  ├─────────────────────────────────────────────┤
+  │ Offload Path (DSP decode)                   │
+  │ App → [压缩数据] → AF → DSP → DAC           │
+  │ CPU: suspend, 功耗 ~5mW                    │
+  └─────────────────────────────────────────────┘
+```
+
+### 8.2 Android Offload 支持的格式
+
+| 格式 | 高通 ADSP | MTK DSP | Exynos | 备注 |
+|:---|:---|:---|:---|:---|
+| **AAC-LC** | ✅ | ✅ | ✅ | 最常见 Offload 格式 |
+| **MP3** | ✅ | ✅ | ✅ | |
+| **FLAC** | ✅ | ✅ | ⚠️ | 无损也可 Offload |
+| **ALAC** | ✅ | ⚠️ | ⚠️ | Apple 格式 |
+| **WMA** | ✅ | ⚠️ | ❌ | |
+| **Opus** | ⚠️ 部分 | ❌ | ❌ | 较新, 支持有限 |
+| **Vorbis** | ✅ | ⚠️ | ❌ | OGG 容器 |
+| **DSD** | ✅ (DoP) | ❌ | ❌ | Hi-Fi 玩家 |
+
+```bash
+# 检查设备支持的 Offload 格式
+adb shell dumpsys media.audio_policy | grep -i offload
+# 或
+adb shell cat /vendor/etc/audio_policy_configuration.xml | grep -i compress
+```
+
+### 8.3 Offload 播放代码路径
+
+```java
+// App 不需要特殊处理, 系统自动选择 Offload:
+// 条件:
+//   1. 单独的音乐播放 (非混音场景)
+//   2. 格式在 Offload 支持列表中
+//   3. 没有绑定需要 PCM 的音效 (如 Visualizer)
+//
+// AudioFlinger 判断逻辑:
+//   → 检查 format 是否在 offload 列表
+//   → 检查 AudioPolicy 是否允许 offload
+//   → 创建 OffloadThread (而非 MixerThread)
+//   → 压缩数据直接送 Compress Offload HAL
+//
+// 禁用 Offload (如需要 PCM 做可视化):
+AudioTrack track = new AudioTrack.Builder()
+    .setOffloadedPlayback(false)  // Android 11+
+    .build();
+```
+
+---
+
+## 9. 编解码质量基准对比
+
+```
+主观音质评测 (MUSHRA / ABX 测试) 近似排名:
+
+  码率: 64kbps Stereo 48kHz
+  ─────────────────────────────────────
+  Opus          ████████████████░ 88/100
+  xHE-AAC       ███████████████░░ 85/100
+  AAC-LC        ███████████░░░░░░ 72/100
+  MP3           ██████████░░░░░░░ 68/100
+  SBC           ██████░░░░░░░░░░░ 52/100
+  
+  码率: 128kbps Stereo 48kHz
+  ─────────────────────────────────────
+  Opus          ██████████████████ 95/100
+  AAC-LC        █████████████████░ 93/100
+  MP3           ███████████████░░░ 88/100
+  Vorbis        ██████████████░░░░ 86/100
+  
+  透明码率 (无法分辨与原始PCM):
+    Opus:   ~160 kbps
+    AAC-LC: ~192 kbps
+    MP3:    ~256 kbps
+    
+  注: 以上数据为典型测试汇总参考, 实际因内容而异
+```
+
+---
+
+## 10. 关键参考 (References)
 
 1.  [Opus Codec Official](https://opus-codec.org/)
 2.  [Bluetooth LE Audio Specification](https://www.bluetooth.com/learn-about-bluetooth/recent-enhancements/le-audio/)
@@ -198,3 +421,5 @@ graph TD
 4.  [FLAC - Free Lossless Audio Codec](https://xiph.org/flac/)
 5.  [Dolby AC-4 Technical Overview](https://professional.dolby.com/tv/dolby-ac-4/)
 6.  [IETF RFC 6716 - Opus](https://datatracker.ietf.org/doc/html/rfc6716)
+7.  [Android MediaCodec API](https://developer.android.com/reference/android/media/MediaCodec)
+8.  [Android Compress Offload](https://source.android.com/docs/core/audio/offload)

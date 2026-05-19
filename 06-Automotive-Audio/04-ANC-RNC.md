@@ -224,10 +224,158 @@ graph LR
 
 ---
 
-## 7. 关键参考 (References)
+## 7. FxLMS 算法伪实现
+
+### 7.1 单通道 FxLMS 核心代码
+
+```c
+// FxLMS (Filtered-x Least Mean Squares) 算法
+// 最经典的 ANC 自适应滤波算法
+
+#define FILTER_LEN   256   // 主滤波器阶数 (W)
+#define SEC_PATH_LEN  64   // 次路径模型阶数 (S^)
+
+typedef struct {
+    float w[FILTER_LEN];       // 主滤波器系数 (自适应)
+    float s_hat[SEC_PATH_LEN]; // 次路径估计 (预辨识, 固定)
+    float x_buf[FILTER_LEN];   // 参考信号缓冲
+    float xf_buf[FILTER_LEN];  // filtered-x 缓冲
+    float mu;                  // 步长 (收敛速度 vs 稳定性)
+} FxLMS;
+
+void fxlms_init(FxLMS *f, float mu) {
+    memset(f, 0, sizeof(FxLMS));
+    f->mu = mu;  // 典型值: 0.0001 ~ 0.01
+    // s_hat[] 通过离线辨识或在线辨识预先填充
+}
+
+// 每个采样点调用一次
+float fxlms_process(FxLMS *f, float x_ref, float e_err) {
+    // 1. 更新参考信号缓冲
+    memmove(&f->x_buf[1], &f->x_buf[0], (FILTER_LEN-1)*sizeof(float));
+    f->x_buf[0] = x_ref;
+    
+    // 2. 计算控制输出: y = W^T * x
+    float y = 0.0f;
+    for (int i = 0; i < FILTER_LEN; i++) {
+        y += f->w[i] * f->x_buf[i];
+    }
+    
+    // 3. 生成 filtered-x 信号: xf = S_hat^T * x
+    memmove(&f->xf_buf[1], &f->xf_buf[0], (FILTER_LEN-1)*sizeof(float));
+    float xf = 0.0f;
+    for (int i = 0; i < SEC_PATH_LEN; i++) {
+        xf += f->s_hat[i] * f->x_buf[i];
+    }
+    f->xf_buf[0] = xf;
+    
+    // 4. LMS 更新: W = W - mu * e * xf
+    for (int i = 0; i < FILTER_LEN; i++) {
+        f->w[i] -= f->mu * e_err * f->xf_buf[i];
+    }
+    
+    return -y;  // 返回反噪声 (取反相)
+}
+```
+
+### 7.2 MIMO ANC 扩展
+
+```
+单通道 → 多通道 MIMO ANC:
+
+  车载场景需要 MIMO (Multiple-Input Multiple-Output):
+    - 多个参考麦克风 (J 个): 捕获不同方向的噪声
+    - 多个误差麦克风 (K 个): 评估各座位消噪效果
+    - 多个扬声器 (M 个): 产生反噪声
+    
+  MIMO FxLMS:
+    W 变为 J×M 个滤波器矩阵
+    S_hat 变为 M×K 个次路径矩阵
+    
+    计算量 = J × M × FILTER_LEN + M × K × SEC_PATH_LEN
+    
+  典型车载 RNC 配置:
+    J = 4-8 参考麦 (轮拱/悬挂/地板)
+    K = 4 误差麦 (头枕位置)
+    M = 8-16 扬声器
+    FILTER_LEN = 256-512
+    
+    → 实时计算量巨大, 需要专用 DSP (如 ADSP / SHARC)
+```
+
+---
+
+## 8. 次路径辨识
+
+```
+次路径 S(z) = 扬声器 → 误差麦克风 的传递函数
+
+  为什么需要辨识次路径?
+    FxLMS 的 filtered-x 需要 S_hat(z) 来补偿相位
+    如果 S_hat 不准确 → 算法发散!
+    
+  辨识方法:
+  
+  1. 离线辨识 (最常用):
+     - 播放白噪声/MLS 信号通过扬声器
+     - 用误差麦克风录音
+     - LMS/RLS 估计 S(z)
+     - 每辆车下线时做一次
+     
+  2. 在线辨识:
+     - 在控制运行中注入微弱的辅助噪声
+     - 持续更新 S_hat(z)
+     - 优点: 适应温度/窗户开关引起的路径变化
+     - 缺点: 辅助噪声可能被乘客听到
+     
+  次路径变化因素:
+    - 温度变化 (空气密度改变)
+    - 车窗开/关
+    - 座位占用/空置
+    - 乘客位置变化
+    → 鲁棒性是车载 ANC 的核心挑战
+```
+
+---
+
+## 9. ANC/RNC 调试与验证
+
+```bash
+# === 车载 ANC/RNC 调试方法 ===
+
+# 1. 消噪量测量 (IL - Insertion Loss)
+#    ANC ON 与 OFF 时, 误差麦位置的 SPL 差值
+#    典型指标: 发动机阶次噪声 -10~-20dB
+#              路噪 (100-500Hz) -3~-8dB
+
+# 2. 稳定性检查
+#    播放不同工况噪声, 观察算法是否发散:
+#    - 发动机启停
+#    - 路面突变 (平坦→颠簸)
+#    - 急加速/急刹车
+#    - 关门/开窗
+
+# 3. 高通平台 ANC 调试:
+adb shell cat /proc/asound/card0/agm_dump | grep -i anc
+adb shell tinymix | grep -i "ANC"
+# 查看 ANC 模块状态和参数
+
+# 4. 频响测试:
+#    用 Audio Precision / PULSE 系统
+#    在各座位头枕处测量:
+#    - ANC OFF 噪声频谱
+#    - ANC ON 噪声频谱
+#    - 差值 = 消噪量曲线
+```
+
+---
+
+## 10. 关键参考 (References)
 
 1.  *Active Noise Control Systems* - Sen M. Kuo & Dennis R. Morgan
 2.  *Signal Processing for Active Control* - Stephen Elliott
 3.  [Analog Devices - Automotive ANC Solutions](https://www.analog.com/en/applications/markets/automotive-pavilion-home/active-noise-cancellation.html)
 4.  [Harman - Road Noise Cancellation](https://www.harman.com/)
 5.  [Bose - Active Sound Management](https://www.bose.com/automotive)
+6.  *Adaptive Signal Processing* - Widrow & Stearns (FxLMS 原始文献)
+7.  [QNX ANC Framework](https://www.qnx.com/developers/docs/)

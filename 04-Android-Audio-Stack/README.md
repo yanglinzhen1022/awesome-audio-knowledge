@@ -37,6 +37,12 @@
     *   AAudio MMAP 独占路径与数据回调模型。
     *   Oboe 跨版本兼容方案与自动重连。
     *   延迟优化 Checklist 与测量方法。
+11. **[VoIP 与通话音频链路 (VoIP & Voice Call Chain)](./11-VoIP-Call-Chain.md)**
+    *   CS Voice / VoLTE / VoNR / VoIP 通话类型全景。
+    *   高通平台 VoLTE 音频路径（ADSP ↔ Modem 直连）。
+    *   VoIP App 架构与 AudioAttributes 配置。
+    *   通话 3A 处理（AEC/NS）与 Jitter Buffer。
+    *   通话质量评估指标与调试命令。
 
 ---
 [返回主目录](../README.md)

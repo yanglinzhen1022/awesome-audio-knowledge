@@ -83,6 +83,7 @@ graph TD
 *   音频接口总线 (Audio Interface & Bus): I2S, TDM, PDM, SoundWire
 *   车载特有硬件: A2B 总线
 *   Codec 芯片专题 (WCD938x / CS系列) 与 SmartPA IV-Sense 闭环保护
+*   USB 音频: UAC 协议、等时传输、snd-usb-audio 驱动、Android USB Audio HAL、Type-C 音频
 
 ### [03. 数字信号处理与算法 (Digital Signal Processing & Algorithms)](./03-Digital-Signal-Processing)
 从传统信号处理到现代 AI 语音交互。
@@ -100,6 +101,7 @@ graph TD
 *   AudioPolicy 深度解析: XML 完整解析、路由决策全链路、Engine 架构、设备连接处理、AudioPatch
 *   Audio HAL: HIDL/AIDL 接口规范与实现
 *   Oboe / AAudio 低延迟音频 API 与 MMAP 独占路径
+*   VoIP 与通话链路: VoLTE/VoNR 全链路、VoIP App 架构、通话 3A、Jitter Buffer、通话质量评估
 
 ### [05. Linux 音频子系统 (Linux Audio Subsystem)](./05-Linux-Audio-Subsystem)
 底层驱动与中间件。

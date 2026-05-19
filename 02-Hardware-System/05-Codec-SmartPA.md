@@ -204,10 +204,182 @@ graph TD
 
 ---
 
-## 4. 关键参考 (References)
+## 4. WCD938x 寄存器操作实战
+
+### 4.1 WCD938x 架构概览
+
+```
+高通 WCD938x 系列 Codec 内部功能模块:
+
+  ┌─────────────────────────────────────────────────────┐
+  │ WCD9380 / WCD9385 Codec                            │
+  │                                                     │
+  │  ┌───────────┐  ┌───────────┐  ┌───────────┐       │
+  │  │ TX Path   │  │ RX Path   │  │ Sidetone  │       │
+  │  │ (录音)    │  │ (播放)    │  │ (侧音)    │       │
+  │  │ ADC ×4    │  │ DAC ×2    │  │ IIR Filter│       │
+  │  │ DMIC ×8   │  │ PA (HP)   │  └───────────┘       │
+  │  │ AMIC ×4   │  │ PA (EAR)  │                      │
+  │  │ HPF/Dec   │  │ Interp    │  ┌───────────┐       │
+  │  └───────────┘  └───────────┘  │ MBHC      │       │
+  │                                 │ (耳机检测) │       │
+  │  ┌───────────┐  ┌───────────┐  └───────────┘       │
+  │  │ SoundWire │  │ Clock/PLL │                       │
+  │  │ Master    │  │ MCLK/PLL  │  ┌───────────┐       │
+  │  │ Slave     │  │ Fractional│  │ SWR/DSD   │       │
+  │  └───────────┘  └───────────┘  └───────────┘       │
+  └─────────────────────────────────────────────────────┘
+  
+  接口: SoundWire (数字音频 + 寄存器控制共用)
+  供电: 1.8V (数字) + 1.8V (模拟) + Buck/LDO
+```
+
+### 4.2 关键寄存器配置示例
+
+```c
+// === WCD938x Codec 驱动常见寄存器操作 ===
+// 文件: techpack/audio/asoc/codecs/wcd938x/wcd938x.c
+
+// 1. RX 数字音量控制 (HPH DAC)
+// 范围: 0x00 (-84dB) ~ 0x54 (0dB) ~ 0x7F (+20dB)
+snd_soc_component_write(component,
+    WCD938X_CDC_RX0_RX_VOL_CTL, 0x54);  // 0dB
+    
+// 2. TX 模拟增益 (Mic PGA)
+// 范围: 0x00 (0dB) ~ 0x14 (20dB), 步进 1dB (近似)
+snd_soc_component_update_bits(component,
+    WCD938X_ANA_TX_CH1, 0x1F, 0x0C);    // +12dB
+
+// 3. HPH (耳机) PA 使能
+snd_soc_component_update_bits(component,
+    WCD938X_ANA_HPH,
+    WCD938X_HPH_EN_MASK,
+    WCD938X_HPH_EN_MASK);  // Enable L+R
+
+// 4. MBHC 耳机检测启用
+snd_soc_component_update_bits(component,
+    WCD938X_MBHC_NEW_CTL_1,
+    WCD938X_MBHC_DET_EN, WCD938X_MBHC_DET_EN);
+```
+
+### 4.3 WCD938x 调试命令
+
+```bash
+# 读取 Codec 寄存器 (通过 debugfs)
+adb shell cat /sys/kernel/debug/regmap/wcd938x-codec/registers
+
+# 查看 Codec DAPM 状态
+adb shell cat /sys/kernel/debug/asoc/wcd938x-codec/dapm_widgets
+
+# 查看 SoundWire 状态
+adb shell cat /sys/kernel/debug/soundwire/master-0/status
+
+# Codec 供电状态
+adb shell cat /sys/kernel/debug/regulator/wcd938x-vdd-buck/consumers
+```
+
+---
+
+## 5. SmartPA IV-Sense 调参流程
+
+### 5.1 IV-Sense 闭环保护原理
+
+```
+IV-Sense (电流/电压感应) 闭环保护:
+
+  ┌─────────────────────────────────────────────────────┐
+  │ SmartPA (如 CS35L45 / TFA9874)                     │
+  │                                                     │
+  │  I2S 输入 (PCM)                                    │
+  │    │                                                │
+  │    ▼                                                │
+  │  ┌──────────────┐                                  │
+  │  │ DSP/算法     │←── V-Sense (扬声器端电压采样)    │
+  │  │  温度估算    │←── I-Sense (扬声器端电流采样)    │
+  │  │  位移估算    │                                  │
+  │  │  增益调整    │                                  │
+  │  └──────┬───────┘                                  │
+  │         │ 保护后的信号                              │
+  │         ▼                                          │
+  │  Class-D 功放 → 扬声器                             │
+  └─────────────────────────────────────────────────────┘
+  
+  保护逻辑:
+    1. 实时采集 V(t) 和 I(t)
+    2. 计算阻抗: Z = V/I → 推算音圈温度 (Re 随温升增大)
+    3. 计算位移: 通过电感变化估算振膜偏移
+    4. 判断:
+       - 温度 > 阈值 → 降低增益 (防烧毁)
+       - 位移 > Xmax → 限幅 (防机械撞击)
+    5. 动态调整输出, 在安全范围内最大化音量
+```
+
+### 5.2 调参关键步骤
+
+```
+SmartPA 调参 (Speaker Tuning) 流程:
+
+  Step 1: 扬声器 T/S 参数测量
+    用激光测振仪 + 阻抗分析仪测量:
+    - Re (直流电阻, 典型 6-8Ω)
+    - Fs (谐振频率)
+    - Qts, Vas, Xmax
+    - BL (力系数)
+    
+  Step 2: 建立扬声器模型
+    在 SmartPA 调参工具中导入参数:
+    - Cirrus: WISCE / SoundClear Studio
+    - NXP/Goodix: TFA Tuning Tool
+    
+  Step 3: 设置保护参数
+    - 最高温度: 通常 80-120°C (取决于音圈材料)
+    - Xmax: 正/负最大位移 (如 ±0.4mm)
+    - 安全余量: 通常留 10-20% 裕度
+    
+  Step 4: EQ 调频响
+    - 目标曲线: 参考 Harman Target Curve
+    - 低频补偿: 小喇叭天然低频不足, 适当 Boost
+    - 高频: 平滑衰减, 避免刺耳
+    
+  Step 5: 验证
+    - 播放粉红噪声/正弦扫频, 观察保护是否触发
+    - THD 测试: 不同音量下失真是否在可接受范围
+    - 跌落测试: 长时间大音量播放, 温度是否稳定
+```
+
+### 5.3 IV-Sense 数据通路 (高通平台)
+
+```
+高通平台 SmartPA IV 反馈路径:
+
+  扬声器
+    │ V-Sense / I-Sense (模拟信号)
+    ▼
+  SmartPA ADC → I2S/TDM TX (数字回传)
+    │
+    ▼
+  ADSP SPF Graph:
+    ├── Speaker Protection Module (SPv4/SPv5)
+    │     → 接收 IV 数据
+    │     → 运行热模型 + 位移模型
+    │     → 输出保护增益
+    ├── 保护增益 → 应用到 RX 路径
+    └── RX Path → I2S/TDM → SmartPA → 扬声器
+    
+  TDM 通道分配 (典型):
+    TX: Ch0 = V-Sense Left,  Ch1 = I-Sense Left
+        Ch2 = V-Sense Right, Ch3 = I-Sense Right
+    RX: Ch0 = Audio Left,    Ch1 = Audio Right
+```
+
+---
+
+## 6. 关键参考 (References)
 
 1.  [NXP TFA98xx Datasheet & Application Notes](https://www.nxp.com/products/audio-and-radio/audio-amplifiers/smart-audio-amplifiers)
 2.  [Qualcomm WCD938x Codec Overview - Qualcomm Developer](https://developer.qualcomm.com/)
 3.  [Cirrus Logic CS35L45 Technical Documentation](https://www.cirrus.com/products/cs35l45/)
 4.  *ALSA ASoC Driver Development* - Linux Kernel Documentation
 5.  [Understanding Speaker Protection - Audio Precision](https://www.ap.com/)
+6.  [Harman Target Response Curve](https://www.harman.com/documents/HarmanTargetCurve.pdf)
+7.  [Goodix Smart Amplifier Solutions](https://www.goodix.com/en/product/audio)

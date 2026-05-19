@@ -216,13 +216,91 @@ graph TD
 
 ---
 
-## 6. 关键参考 (References)
+## 6. 高通 vs MTK vs 三星 平台对比
+
+```
+主流手机 SoC 音频子系统对比 (旗舰级):
+
+  ┌──────────────────┬────────────────────┬────────────────────┬──────────────────┐
+  │ 维度             │ 高通 SM8650        │ MTK Dimensity 9300 │ Samsung Exynos    │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ 音频 DSP         │ Hexagon ADSP       │ Hifi5 DSP          │ cDSP             │
+  │                  │ (独立核)           │ (共享 SCP)         │ (ARM Cortex)     │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ Codec 芯片       │ WCD9395            │ MT6373 (集成)      │ 集成 Codec       │
+  │                  │ (外挂, SoundWire)  │                    │ (SoC 内部)       │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ 数字接口         │ SoundWire + I2S    │ TDM + I2S          │ I2S              │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ SmartPA 支持     │ SoundWire/I2S      │ I2S + I2C          │ I2S + I2C        │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ 算法框架         │ AudioReach SPF     │ SWIP               │ 自研框架         │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ 语音唤醒         │ 三级 (Codec VAD    │ SCP 低功耗唤醒     │ VTS (Voice       │
+  │                  │ + ADSP KWD + AP)   │                    │ Trigger System)  │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ 最大采样率       │ 384kHz (Codec)     │ 192kHz             │ 192kHz           │
+  │                  │ DSD512 (via DoP)   │                    │                  │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ Offload 解码     │ AAC/MP3/FLAC/ALAC  │ AAC/MP3/FLAC       │ AAC/MP3          │
+  │                  │ Opus/WMA/DSD       │                    │                  │
+  ├──────────────────┼────────────────────┼────────────────────┼──────────────────┤
+  │ 空间音频         │ Snapdragon Sound   │ 第三方 (Dolby)     │ Samsung 360 Audio│
+  │                  │ (ADSP 渲染)        │                    │                  │
+  └──────────────────┴────────────────────┴────────────────────┴──────────────────┘
+```
+
+---
+
+## 7. 典型手机音频原理图解读
+
+```
+高通旗舰手机音频硬件连接 (简化原理图):
+
+  ┌──────────────────────────────────────────────────────────────────┐
+  │ SM8650 SoC                                                       │
+  │                                                                  │
+  │  LPAIF (Low-Power Audio Interface):                             │
+  │    ├── SoundWire Master 0 → WCD9395 (Codec)                    │
+  │    │     ├── DMIC 0/1 (底部双麦)                                │
+  │    │     ├── DMIC 2/3 (顶部双麦)                                │
+  │    │     ├── AMIC (模拟麦接口, 预留)                            │
+  │    │     ├── HPH_L/R (耳机输出)                                 │
+  │    │     ├── EAR (听筒输出)                                     │
+  │    │     └── MBHC (耳机检测)                                    │
+  │    │                                                            │
+  │    ├── SoundWire Master 1 → WSA8845 ×2 (SmartPA)               │
+  │    │     ├── WSA8845 #1 → Speaker L                            │
+  │    │     └── WSA8845 #2 → Speaker R                            │
+  │    │                                                            │
+  │    ├── TDM/I2S → 外部 SmartPA (可选, 如 CS35L45)              │
+  │    │                                                            │
+  │    └── AUX PCM → BT Codec (SCO 通话)                           │
+  │                                                                  │
+  │  USB → USB Audio HAL → 外部 DAC/耳机                            │
+  └──────────────────────────────────────────────────────────────────┘
+  
+  电源设计注意:
+    - WCD9395: VDDA (1.8V Analog) + VDDD (1.8V Digital) + VDD_Buck
+    - WSA8845: VBAT (3.8V, 直接接电池电压!) + VDD (1.8V)
+    - 所有 LDO 需要 DAPM 控制, 不使用时关断省电
+    
+  PCB Layout 注意:
+    - DMIC 走线远离高速数字信号 (DDR/UFS)
+    - SoundWire 差分线阻抗匹配 (50Ω)
+    - SmartPA 到 Speaker 走线尽量短且宽 (大电流)
+```
+
+---
+
+## 8. 关键参考 (References)
 
 1.  [Qualcomm SM8650 Audio Subsystem](https://www.qualcomm.com/products/mobile/snapdragon/smartphones/snapdragon-8-series-mobile-platforms)
 2.  [WCD9395 Codec Datasheet](https://www.qualcomm.com/)
 3.  [MIPI SoundWire Specification](https://www.mipi.org/specifications/soundwire)
 4.  [SmartPA Technology Overview - Cirrus Logic](https://www.cirrus.com/)
 5.  [USB Audio Class 2.0 Specification](https://www.usb.org/)
+6.  [MediaTek Audio Technology](https://www.mediatek.com/products/smartphones)
 
 ---
 *Next Topic: [车载音频硬件架构 (Automotive Audio Hardware)](./04-Automotive-Hardware.md)*

@@ -199,8 +199,186 @@ sequenceDiagram
 
 ---
 
-## 4. 关键参考 (References)
+## 4. 场景三：蓝牙设备切换时音频路由变化
+
+```mermaid
+sequenceDiagram
+    participant User as 用户操作
+    participant BT as Bluetooth Stack
+    participant APS as AudioPolicyService
+    participant AF as AudioFlinger
+    participant HAL_SPK as Speaker HAL
+    participant HAL_BT as BT A2DP HAL
+
+    Note over User,HAL_BT: ======= 当前: Speaker 播放音乐 =======
+    AF->>HAL_SPK: write(PCM) → Speaker 输出中
+
+    Note over User,HAL_BT: ======= BT 耳机连接 =======
+    User->>BT: 蓝牙耳机开机配对
+    BT->>BT: ACL 连接 → A2DP 服务连接 → AVDTP 建立
+    BT->>APS: reportNewDevice(BT_A2DP)
+    
+    Note over User,HAL_BT: ======= AudioPolicy 路由切换 =======
+    APS->>APS: checkOutputsForDevice(): BT_A2DP 可用
+    APS->>APS: getDeviceForStrategy(MEDIA) → 优先选 BT_A2DP
+    APS->>AF: createAudioPatch(SPEAKER→BT_A2DP)
+    AF->>HAL_SPK: standby() → Speaker 停止
+    AF->>HAL_BT: open_output_stream(A2DP)
+    
+    Note over User,HAL_BT: ======= Codec 协商 =======
+    HAL_BT->>BT: getCodecConfig() → 优先 LDAC > aptX > AAC > SBC
+    BT->>BT: AVDTP SetConfiguration(LDAC 96kHz/24bit 990kbps)
+    
+    Note over User,HAL_BT: ======= 数据流切换 =======
+    AF->>HAL_BT: write(PCM 48kHz) → BT HAL 编码 LDAC
+    HAL_BT->>BT: 编码后数据 → L2CAP → 射频发送
+    BT-->>User: 耳机出声, Speaker 静音
+```
+
+### 4.1 蓝牙断开时的回退
+
+```
+蓝牙耳机断开 → 路由回退:
+
+  1. BT Stack 检测到 ACL 断开
+  2. 通知 AudioPolicy: removeDevice(BT_A2DP)
+  3. AudioPolicy 重新评估路由:
+     → getDeviceForStrategy(MEDIA) → SPEAKER (回退)
+  4. AudioFlinger:
+     → BT HAL standby() / close()
+     → Speaker HAL reopen()
+     → 重新开始向 Speaker 写数据
+     
+  潜在问题:
+    - 切换间隙可能有 ~200-500ms 静音
+    - 如果 Speaker HAL open 慢 → 更长中断
+    - 某些 App 可能收不到 AudioDeviceCallback
+```
+
+---
+
+## 5. 场景四：录音链路 (麦克风到 App)
+
+```
+录音全链路 (逆向数据流):
+
+  ┌──────────────────────────────────────────────────────────────┐
+  │ 物理层                                                      │
+  │   声波 → DMIC/AMIC → Codec ADC → I2S/SoundWire → SoC      │
+  │   (声压→电信号→数字PCM)                                     │
+  ├──────────────────────────────────────────────────────────────┤
+  │ 内核层                                                      │
+  │   DMA: I2S RX FIFO → 内存 ring buffer                      │
+  │   ALSA: period 完成 → 通知用户空间                          │
+  ├──────────────────────────────────────────────────────────────┤
+  │ HAL 层                                                      │
+  │   pcm_read() → 可选: ADSP 3A 处理 (AEC/NS/AGC)            │
+  │   → 返回处理后的 PCM                                       │
+  ├──────────────────────────────────────────────────────────────┤
+  │ Framework 层                                                │
+  │   AudioFlinger RecordThread:                                │
+  │     → HAL read (周期性)                                     │
+  │     → 音效处理 (如系统 NS/AEC)                             │
+  │     → 写入共享内存 ring buffer                              │
+  │   AudioRecord ClientProxy:                                  │
+  │     → 从共享内存读取                                        │
+  ├──────────────────────────────────────────────────────────────┤
+  │ App 层                                                      │
+  │   AudioRecord.read(buffer, size)                            │
+  │   → 获得 PCM 数据                                          │
+  │   → 编码 (Opus/AAC) / 存储 / 网络发送                      │
+  └──────────────────────────────────────────────────────────────┘
+  
+  录音 AudioSource 与路由:
+    VOICE_RECOGNITION    → 主麦, 关闭 NS (保证 ASR 准确)
+    VOICE_COMMUNICATION  → 主麦, 开启 AEC+NS (通话)
+    MIC (默认)           → 主麦, 可能有轻量 NS
+    CAMCORDER            → 后置麦, 可能有风噪抑制
+    UNPROCESSED          → 原始 ADC 输出, 无任何处理
+```
+
+---
+
+## 6. 场景五：通话中切免提 (路由热切换)
+
+```
+通话中按免提按钮的全链路变化:
+
+  用户操作: 按下免提按钮 (Speaker On)
+    │
+    ▼
+  InCallService → AudioManager.setSpeakerphoneOn(true)
+    │
+    ▼
+  AudioService → AudioPolicyManager::setForceUse(
+      FOR_COMMUNICATION, FORCE_SPEAKER)
+    │
+    ▼
+  AudioPolicy 重新路由:
+    输出: EARPIECE → SPEAKER
+    输入: BUILTIN_MIC → BACK_MIC (免提时用上方麦, AEC 效果更好)
+    │
+    ▼
+  ADSP Graph 切换:
+    1. 断开旧路径: Voice-Rx → Earpiece DAC
+    2. 建立新路径: Voice-Rx → Speaker SmartPA
+    3. AEC 参考信号切换: 从 Earpiece 回环 → 从 Speaker 回环
+    4. 麦克风增益调整: 免提距离远, 增益加大
+    │
+    ▼
+  Codec 路由变化:
+    RX: HPH PA off → Speaker PA on
+    TX: Mic PGA 切换 + 增益调整
+    │
+    ▼
+  用户感知: 声音从听筒切到扬声器, ~100-300ms 切换时间
+  
+  常见问题:
+    - 切换时"咔嗒"声: DAC/PA 切换瞬间电流冲击
+    - AEC 不收敛: 参考信号路径变了, 滤波器需要重新适应
+    - 回声短暂出现: AEC 重收敛的几百毫秒内
+```
+
+---
+
+## 7. 各场景调试命令速查
+
+```bash
+# ==================== 通用 ====================
+# 当前完整音频状态 (最全面)
+adb shell dumpsys media.audio_flinger
+adb shell dumpsys media.audio_policy
+
+# ==================== 播放链路 ====================
+# 当前活跃输出
+adb shell dumpsys media.audio_flinger | grep -A20 "Output thread"
+# 查看 Track 状态 (ACTIVE/PAUSED/IDLE)
+adb shell dumpsys media.audio_flinger | grep -B2 -A10 "ACTIVE"
+
+# ==================== 蓝牙链路 ====================
+# 蓝牙音频编解码器
+adb shell dumpsys bluetooth_manager | grep -iE "codec|a2dp"
+# AVDTP 状态
+adb shell dumpsys bluetooth_manager | grep -i "state"
+
+# ==================== 录音链路 ====================
+# 活跃录音流
+adb shell dumpsys media.audio_flinger | grep -A10 "Input thread"
+# 麦克风权限 (谁在录音)
+adb shell dumpsys media.audio_flinger | grep -i "client\|pid"
+
+# ==================== 路由切换 ====================
+# 实时路由变化 logcat
+adb logcat -s AudioPolicyManager AudioPolicyService AudioFlinger
+# 关键搜索词: "routing", "device", "patch", "connect"
+```
+
+---
+
+## 8. 关键参考 (References)
 
 1.  本知识库各模块文档（参见主 [README](../README.md)）
 2.  [Android Audio Architecture](https://source.android.com/docs/core/audio/architecture)
 3.  [ALSA Project Documentation](https://www.alsa-project.org/wiki/Documentation)
+4.  [Android Bluetooth Audio](https://source.android.com/docs/core/connect/bluetooth/bluetooth-audio)
+5.  [AudioPolicy Routing - AOSP](https://source.android.com/docs/core/audio/routing)
