@@ -488,7 +488,479 @@ AAudioStream_getFramesPerBurst(stream, &framesPerBurst);
 
 ---
 
-## 8. 完整公式速查表
+## 8. Stream Type / Usage / AudioAttributes (音频属性)
+
+### 8.1 概念
+
+Android 中每条音频流都要声明"我是什么类型的音频"，系统据此做**音量控制**和**路由决策**。
+
+```
+演进历史:
+
+  Android 1.0-7.x:  StreamType (已废弃)
+    STREAM_MUSIC / STREAM_RING / STREAM_ALARM / STREAM_VOICE_CALL ...
+    问题: 类型太粗, 无法区分导航语音和音乐, 都是 STREAM_MUSIC
+    
+  Android 8.0+:     AudioAttributes (推荐)
+    二维描述:
+      Usage       = "我的目的是什么" (媒体/通话/导航/通知...)
+      ContentType = "我的内容是什么" (音乐/语音/电影/超声波...)
+    
+    额外标记:
+      Flags       = 行为修饰 (低延迟/硬件AV同步/可闻性强制...)
+```
+
+### 8.2 代码中的 AudioAttributes
+
+```java
+// === 音乐播放 ===
+AudioAttributes musicAttrs = new AudioAttributes.Builder()
+    .setUsage(AudioAttributes.USAGE_MEDIA)
+    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+    .build();
+
+// === 导航语音 (车载场景极其重要, 决定路由到哪个 Bus) ===
+AudioAttributes naviAttrs = new AudioAttributes.Builder()
+    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+    .build();
+
+// === 低延迟游戏音频 ===
+AudioAttributes gameAttrs = new AudioAttributes.Builder()
+    .setUsage(AudioAttributes.USAGE_GAME)
+    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+    .setFlags(AudioAttributes.FLAG_LOW_LATENCY)
+    .build();
+
+// === 语音通话 ===
+AudioAttributes callAttrs = new AudioAttributes.Builder()
+    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+    .build();
+```
+
+```
+AudioPolicy 如何使用 AudioAttributes:
+
+  AudioAttributes → ProductStrategy → VolumeGroup → 音量曲线
+                  → RoutingRule       → 输出设备
+  
+  常见 Usage 与路由:
+    USAGE_MEDIA              → Speaker / Headphone / BT A2DP
+    USAGE_VOICE_COMMUNICATION → Earpiece / BT SCO
+    USAGE_ALARM              → Speaker (即使静音也要出声)
+    USAGE_ASSISTANCE_NAVIGATION_GUIDANCE → 车载: 指定 Bus
+```
+
+---
+
+## 9. Audio Session ID (音频会话 ID)
+
+### 9.1 概念
+
+Session ID 是一个 **int** 值, 用于将 AudioTrack / MediaPlayer 与 AudioEffect 绑定。同一 Session ID 的音频流共享同一条音效链。
+
+```
+Session ID 的作用:
+
+  ┌──────────────┐     Session = 100      ┌──────────────┐
+  │  AudioTrack  │ ──────────────────────→ │ Effect Chain │
+  │  (音乐播放)  │                         │ EQ + Reverb  │
+  └──────────────┘                         └──────────────┘
+  
+  ┌──────────────┐     Session = 200      ┌──────────────┐
+  │  AudioTrack  │ ──────────────────────→ │ Effect Chain │
+  │  (游戏音效)  │                         │ (无音效)     │
+  └──────────────┘                         └──────────────┘
+  
+  特殊 Session ID:
+    SESSION_ID_NONE (0)         → 不绑定任何音效
+    SESSION_OUTPUT_MIX          → 全局输出混音后的音效 (如 Visualizer)
+    SESSION_OUTPUT_STAGE        → 最终输出阶段 (系统级)
+    
+  生成方式:
+    AudioManager.generateAudioSessionId()  → 返回唯一 ID
+```
+
+### 9.2 代码示例
+
+```java
+// 创建 Session
+int sessionId = audioManager.generateAudioSessionId();
+
+// AudioTrack 绑定 Session
+AudioTrack track = new AudioTrack.Builder()
+    .setSessionId(sessionId)
+    .build();
+
+// 将 EQ 音效绑定到同一 Session
+Equalizer eq = new Equalizer(0, sessionId);
+eq.setEnabled(true);
+eq.setBandLevel((short) 0, (short) 300); // Band 0 +3dB
+
+// Visualizer 绑定到全局输出 (Session 0)
+Visualizer visualizer = new Visualizer(0); // session 0 = 全局
+visualizer.setCaptureSize(Visualizer.getCaptureSizeRange()[1]);
+```
+
+---
+
+## 10. Volume / Gain / dB (音量与增益)
+
+### 10.1 概念
+
+```
+音量的三种表示:
+
+  1. 线性 (Linear):  0.0 = 静音, 1.0 = 满幅
+     特点: 直觉上不均匀 (0.1→0.2 和 0.5→0.6 听感差异巨大)
+     
+  2. 分贝 (dB):      0 dB = 满幅, -∞ dB = 静音
+     换算: dB = 20 × log₁₀(linear)
+     特点: 符合人耳感知 (每 -6dB ≈ 音量减半)
+     
+  3. 整数级 (Index):  0-15 (Android 音量条)
+     系统通过音量曲线 (Volume Curve) 映射到 dB
+
+  转换公式:
+    linear → dB:   dB = 20 × log₁₀(linear)
+    dB → linear:   linear = 10^(dB/20)
+    
+  常用 dB 值:
+    0 dB    = 1.0    (满幅)
+    -6 dB   = 0.501  (约一半响度)
+    -20 dB  = 0.1    (十分之一)
+    -60 dB  = 0.001  (几乎听不到)
+    -∞ dB   = 0.0    (静音)
+```
+
+### 10.2 Android 音量体系
+
+```
+Android 多级音量:
+
+  ┌───────────────────────────────────────────────┐
+  │ App 层:    AudioTrack.setVolume(0.8f)         │ ← 线性 0-1
+  ├───────────────────────────────────────────────┤
+  │ Framework: AudioManager.setStreamVolume(idx)  │ ← Index 0-15
+  │            → AudioService 查 Volume Curve     │
+  │            → 映射为 dB 值                     │
+  ├───────────────────────────────────────────────┤
+  │ AudioFlinger: Track volume (float)            │ ← 线性衰减
+  │               Master volume                   │ ← 叠加
+  ├───────────────────────────────────────────────┤
+  │ HAL:   set_volume(left, right)                │ ← 线性 0-1
+  ├───────────────────────────────────────────────┤
+  │ Codec: PGA (Programmable Gain Amplifier)      │ ← 寄存器 dB 值
+  │        DAC digital gain                       │
+  └───────────────────────────────────────────────┘
+  
+  最终音量 = App vol × Stream vol × Master vol × HAL vol
+  全部是线性相乘 (对应 dB 相加)
+```
+
+```java
+// === 代码示例 ===
+// 设置流音量 (Index)
+AudioManager am = (AudioManager) getSystemService(AUDIO_SERVICE);
+int maxVol = am.getStreamMaxVolume(AudioManager.STREAM_MUSIC); // 15
+am.setStreamVolume(AudioManager.STREAM_MUSIC, maxVol / 2, 0);
+
+// 设置 Track 音量 (Linear 0.0-1.0)
+audioTrack.setVolume(0.8f);  // 左右声道相同
+audioTrack.setStereoVolume(1.0f, 0.5f); // 左满右半
+
+// dB 与线性互转
+float linearToDb(float linear) {
+    return (linear <= 0f) ? Float.NEGATIVE_INFINITY
+                          : 20f * (float) Math.log10(linear);
+}
+float dbToLinear(float dB) {
+    return (float) Math.pow(10f, dB / 20f);
+}
+```
+
+---
+
+## 11. Interleaved vs Non-interleaved (交织 vs 平面)
+
+```
+两种 PCM 多声道数据排列方式:
+
+  Interleaved (交织, 最常见):
+    所有声道的采样交替排列
+    
+    内存: [L0][R0][L1][R1][L2][R2][L3][R3]...
+          └Frame0┘ └Frame1┘ └Frame2┘ └Frame3┘
+    
+    优点: 一个指针顺序读取, 一个 Frame 连续
+    缺点: SIMD/NEON 处理时需要 deinterleave
+    使用: ALSA 默认, Android HAL, 大多数 API
+    API:  pcm_writei()  ← "i" = interleaved
+    
+  Non-interleaved (非交织 / Planar, 平面):
+    每个声道独立连续存放
+    
+    Buffer L: [L0][L1][L2][L3][L4]...
+    Buffer R: [R0][R1][R2][R3][R4]...
+    
+    优点: 单声道连续 → SIMD/NEON 并行处理效率高
+    缺点: 需要多个 buffer 指针
+    使用: AudioFlinger 内部混音, FFmpeg planar 格式
+    API:  pcm_writen()  ← "n" = non-interleaved
+
+  FFmpeg 中的命名:
+    AV_SAMPLE_FMT_S16   = interleaved signed 16-bit
+    AV_SAMPLE_FMT_S16P  = planar signed 16-bit  ← "P" 后缀
+    AV_SAMPLE_FMT_FLTP  = planar float
+```
+
+---
+
+## 12. Underrun / Overrun / Xrun (欠载 / 溢出)
+
+### 12.1 概念
+
+```
+音频数据流是实时的 — 数据必须按时到达, 否则:
+
+  Underrun (欠载, 播放):
+    HAL 要从 buffer 读数据, 但 App/AudioFlinger 还没写够
+    → buffer 空了 → HAL 只能送出静音或重复数据
+    → 听感: "咔嗒" / 卡顿 / 爆音
+    
+  Overrun (溢出, 录音):
+    麦克风持续产生数据, 但 App 没有及时 read()
+    → buffer 满了 → 新数据覆盖旧数据 (或被丢弃)
+    → 听感: 录音丢帧 / 数据不连续
+    
+  Xrun = Underrun 或 Overrun 的统称
+
+  ┌─────────────── Ring Buffer ───────────────┐
+  │ ▓▓▓▓▓▓░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │
+  │ ↑ Read                    ↑ Write          │
+  │ └──── 可用数据 ────┘└──── 空闲空间 ────┘  │
+  │                                            │
+  │  Read 追上 Write → Underrun! (播放)        │
+  │  Write 追上 Read → Overrun!  (录音)        │
+  └────────────────────────────────────────────┘
+```
+
+### 12.2 代码中检测和处理
+
+```java
+// === Android Java 层 ===
+// 获取 underrun 次数 (Android 7.0+)
+int underrunCount = audioTrack.getUnderrunCount();
+// underrunCount > 0 说明发生过卡顿
+
+// AudioRecord 的 overrun
+// 通过 AudioRecord.read() 返回的 frame 数判断
+// 如果 < 请求数 → 可能有问题
+```
+
+```bash
+# === 调试命令 ===
+# 查看 AudioFlinger 统计
+adb shell dumpsys media.audio_flinger | grep -iE "underrun|overrun|xrun"
+#   Thread 0x... (Mixer)
+#     Underruns: 3
+#
+# ALSA 层
+adb shell cat /proc/asound/card0/pcm0p/sub0/status
+#   status: RUNNING / XRUN
+```
+
+---
+
+## 13. Timestamp & Presentation Position (时间戳与呈现位置)
+
+### 13.1 概念
+
+```
+问题: 我 write() 了 10000 个 frame, DAC 实际播了多少个?
+
+  AudioTimestamp 包含:
+    framePosition  = DAC 已播放的总 frame 数 (单调递增)
+    nanoTime       = 该 framePosition 对应的系统时钟 (CLOCK_MONOTONIC)
+    
+  用途:
+    - A/V 同步: 根据已播 frame 数推算当前播放位置, 同步视频帧
+    - 播放进度: 精确到 frame 级别的播放位置
+    - Glitch 检测: 如果 framePosition 不连续 → 有 underrun
+```
+
+### 13.2 代码示例
+
+```java
+// === Android Java 层 ===
+AudioTimestamp ts = new AudioTimestamp();
+if (track.getTimestamp(ts)) {
+    long framesPlayed = ts.framePosition;
+    long timeNs = ts.nanoTime;
+    
+    // 推算"现在"DAC 正在播的 frame
+    long nowNs = System.nanoTime();
+    long elapsedNs = nowNs - timeNs;
+    long elapsedFrames = (elapsedNs * sampleRate) / 1_000_000_000L;
+    long currentFrame = framesPlayed + elapsedFrames;
+    
+    // 换算成播放时间 (毫秒)
+    double playbackMs = (double) currentFrame / sampleRate * 1000.0;
+}
+```
+
+```c
+// === AAudio C 层 ===
+int64_t presentationFrame, presentationTime;
+aaudio_result_t result = AAudioStream_getTimestamp(
+    stream,
+    CLOCK_MONOTONIC,
+    &presentationFrame,
+    &presentationTime);
+// presentationFrame = DAC 已送出的 frame
+// presentationTime  = 对应的时钟纳秒值
+```
+
+---
+
+## 14. Callback vs Blocking 模式 (回调 vs 阻塞)
+
+```
+两种音频数据写入/读取模式:
+
+  ┌────────────────────────────────────────────────────┐
+  │ Blocking (阻塞) 模式                              │
+  │                                                    │
+  │   App 线程:                                        │
+  │     while (playing) {                              │
+  │       fillBuffer(data);                            │
+  │       track.write(data, ...);  // ← 阻塞等待!     │
+  │     }                                              │
+  │                                                    │
+  │   优点: 简单直观                                   │
+  │   缺点: 需要独立线程; 延迟取决于 buffer 大小       │
+  │   Android: AudioTrack.WRITE_BLOCKING               │
+  ├────────────────────────────────────────────────────┤
+  │ Callback (回调) 模式                               │
+  │                                                    │
+  │   系统定时调用 App 提供的回调函数:                  │
+  │     void onAudioReady(stream, audioData, numFrames)│
+  │     {                                              │
+  │       // 在这里填写 numFrames 个 frame 的数据       │
+  │       // 必须在规定时间内完成!                      │
+  │     }                                              │
+  │                                                    │
+  │   优点: 最低延迟; 系统管理线程和时序               │
+  │   缺点: 回调中不能做任何阻塞操作 (文件读/锁/alloc)│
+  │   Android: AAudio Callback / Oboe                  │
+  └────────────────────────────────────────────────────┘
+```
+
+```cpp
+// === AAudio Callback 模式 ===
+aaudio_data_callback_result_t myCallback(
+    AAudioStream *stream,
+    void *userData,
+    void *audioData,       // ← 往这里写数据
+    int32_t numFrames)     // ← 需要填写的 frame 数
+{
+    float *output = (float *) audioData;
+    // 生成正弦波 (示例)
+    for (int i = 0; i < numFrames; i++) {
+        float sample = sinf(phase);
+        *output++ = sample;  // Left
+        *output++ = sample;  // Right
+        phase += phaseIncrement;
+    }
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+// 设置回调
+AAudioStreamBuilder_setDataCallback(builder, myCallback, userData);
+AAudioStreamBuilder_setPerformanceMode(builder,
+    AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+```
+
+---
+
+## 15. Shared vs Exclusive 模式 (共享 vs 独占)
+
+```
+AAudio 的两种共享模式:
+
+  Shared (共享, 默认):
+    多个 App 的音频经过 AudioFlinger 混音后输出
+    App → AudioFlinger (混音) → HAL → 硬件
+    
+    优点: 多 App 同时出声
+    缺点: 额外一跳延迟 (~10-20ms)
+    
+  Exclusive (独占, MMAP):
+    App 直接访问硬件 buffer, 绕过 AudioFlinger
+    App → MMAP → HAL → 硬件
+    
+    优点: 最低延迟 (~1-5ms)
+    缺点: 独占硬件, 其他 App 无法用此设备
+    限制: 需要 HAL 支持 MMAP, 并非所有设备可用
+    
+  ┌─────────────────────────────────────────┐
+  │ Shared Mode                             │
+  │ App A ─┐                                │
+  │ App B ─┤→ AudioFlinger → HAL → Speaker  │
+  │ App C ─┘   (混音)                       │
+  ├─────────────────────────────────────────┤
+  │ Exclusive Mode (MMAP)                   │
+  │ App A ──────────────→ HAL → Speaker     │
+  │            (直通, 绕过 AudioFlinger)     │
+  └─────────────────────────────────────────┘
+```
+
+```cpp
+// === AAudio 请求独占模式 ===
+AAudioStreamBuilder_setSharingMode(builder,
+    AAUDIO_SHARING_MODE_EXCLUSIVE);  // 请求独占
+
+// 打开后检查实际获得的模式
+aaudio_sharing_mode_t actualMode =
+    AAudioStream_getSharingMode(stream);
+if (actualMode == AAUDIO_SHARING_MODE_SHARED) {
+    // 独占不可用, 回退到共享模式
+    ALOGW("Exclusive mode not available, using Shared");
+}
+```
+
+---
+
+## 16. Mixing (混音)
+
+```
+混音 = 多路音频信号合并为一路输出
+
+  AudioFlinger 混音过程:
+
+    Track 1 (音乐,    48kHz S16 Stereo) → 转 float → ×volume ──┐
+    Track 2 (通知铃声, 44.1kHz S16 Mono) → SRC → 转 float → ×volume ──┤→ Σ 相加 → clamp → 输出
+    Track 3 (游戏音效, 48kHz Float Stereo) → ×volume ──┘
+
+  混音公式:
+    output[i] = Σ (track[n][i] × volume[n])  // 线性相加
+    output[i] = clamp(output[i], -1.0f, 1.0f) // 防止削波
+    
+  为什么用 float 混音?
+    - int16 相加极易溢出: 32767 + 32767 = 65534 → 溢出!
+    - float 范围巨大, 混音后再 clamp 即可
+    
+  AudioFlinger 的 AudioMixer:
+    位置: frameworks/av/services/audioflinger/AudioMixer.cpp
+    输入: 各 Track (任意格式/采样率/声道)
+    处理: Resampler → Format convert → Volume → Mix
+    输出: float buffer → 输出给 HAL
+```
+
+---
+
+## 17. 完整公式速查表
 
 ```
 核心公式:
@@ -517,7 +989,7 @@ AAudioStream_getFramesPerBurst(stream, &framesPerBurst);
 
 ---
 
-## 9. 概念关系全景图
+## 18. 概念关系全景图
 
 ```mermaid
 graph TD
@@ -542,7 +1014,7 @@ graph TD
 
 ---
 
-## 10. 常见陷阱 FAQ
+## 19. 常见陷阱 FAQ
 
 | # | 陷阱 | 说明 |
 |:---|:---|:---|
@@ -556,7 +1028,7 @@ graph TD
 
 ---
 
-## 11. 关键参考 (References)
+## 20. 关键参考 (References)
 
 1.  [Android AudioTrack API Reference](https://developer.android.com/reference/android/media/AudioTrack)
 2.  [AAudio API Reference](https://developer.android.com/ndk/guides/audio/aaudio/aaudio)
