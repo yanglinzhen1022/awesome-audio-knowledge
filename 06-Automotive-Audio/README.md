@@ -42,5 +42,14 @@
     *   车载 Audio HAL 扩展与多 Bus 配置。
     *   车载场景调试命令与常见问题诊断。
 
+7.  **[SOME/IP 音频传输 (Service-Oriented Middleware over IP)](./07-SOME-IP-Audio.md)**
+    *   为什么车载音频需要 SOME/IP：架构演进与线束减重。
+    *   SOME/IP 协议栈与消息格式。
+    *   SOME/IP vs AVB/TSN vs Raw UDP 方案对比与选型。
+    *   SOME/IP 音频服务设计（FIDL 接口定义、数据流）。
+    *   端到端延迟分析与 Jitter Buffer 设计。
+    *   vsomeip 开源框架代码示例（发送/接收）。
+    *   SOME/IP + TSN 混合架构（高端车型）。
+
 ---
 [返回主目录](../README.md)

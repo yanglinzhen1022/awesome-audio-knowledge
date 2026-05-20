@@ -118,6 +118,7 @@ graph TD
 *   主动降噪与路噪消除 (ANC/RNC)：FxLMS 算法、MIMO 架构、ESE 声浪模拟
 *   AudioControl HAL 与 AAOS 架构演进：AIDL 接口、Hypervisor 多 OS 隔离、AVB/TSN
 *   高通车载音频平台 (SA8295)：多域架构、Bringup 流程、TDM 配置、车载 AudioReach Graph、HFP 通话
+*   SOME/IP 音频传输：以太网音频方案选型 (SOME/IP vs AVB/TSN)、Jitter Buffer、vsomeip 实践
 
 ### [07. 高通平台专题 (Qualcomm Platform)](./07-Qualcomm-Platform)
 深度解析高通平台的专有音频技术。
