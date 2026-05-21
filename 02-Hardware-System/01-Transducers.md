@@ -258,13 +258,13 @@ graph TD
   压电式扬声器 (Piezoelectric Speaker):
     原理: 压电材料加电变形 → 振动发声
     应用: 骨传导耳机、超薄设备、声表面扬声器
-    供应商: 美律实 (Murata)、TDK
+    供应商: 村田制作所 (Murata)、TDK
     特点: 超薄 (<1mm)、低功耗、但低频差
 
   平板式扬声器 (Planar Magnetic):
     原理: 导电薄膜在平面磁场中运动
     应用: 高端耳机 (Audeze LCD、HiFiMAN)
-    特点: 低失真、瓦态响应好、但功耗大
+    特点: 低失真、瞬态响应好、但功耗大
 
   静电式扬声器 (Electrostatic):
     原理: 带电薄膜在电场中运动 (F = qE)
@@ -276,7 +276,7 @@ graph TD
 
 | 供应商 | 代表型号/产品线 | 类型 | 应用 |
 |:---|:---|:---|:---|
-| **AAC Technologies (瘴声声学)** | 15mm/17mm 微型 SPK | 动圈式微型 | 手机 (苹果/华为/小米 主力供应商) |
+| **AAC Technologies (瑞声科技)** | 15mm/17mm 微型 SPK | 动圈式微型 | 手机 (苹果/华为/小米 主力供应商) |
 | **Goertek (歌尔股份)** | SPK模组 + Receiver | 动圈式微型 | 手机/TWS 耳机/VR/AR |
 | **Knowles** | BA (Balanced Armature) 系列 | 动铁式微型 | 入耳式耳机、助听器 |
 | **Harman/JBL** | JBL 车载系列、Infinity | 动圈式全尺寸 | 车载 OEM (BMW/奇瑞) |

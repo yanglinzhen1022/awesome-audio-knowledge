@@ -180,7 +180,7 @@ graph TD
 | **CS35L45** | Cirrus Logic | Haptics 支持、低功耗 |
 | **MAX98390** | Maxim (ADI) | 集成 DSP、热保护 |
 | **AW882xx** | 艾为电子 | 国产方案、性价比高 |
-| **FS19xx** | 富芮坤 | 国产、车载认证 |
+| **FS19xx** | 富芮坤 (Foursemi) | 国产、车载认证 |
 
 ### 2.4 SmartPA 的音质增强算法
 
