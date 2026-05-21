@@ -122,8 +122,9 @@ graph TD
     └── 后排娱乐 (Rear Seat Entertainment)
 
 优先级仲裁:
-  e-Call > AVAS > Chime > Phone > Nav > Media
+  e-Call > Chime > Phone > Nav > Media  
   QNX 域有硬件级优先权, 可强制 Duck/Mute Android 域
+  AVAS不参与仲裁，不影响安卓和CHIME发音
 ```
 
 ### 2.3 跨域通信

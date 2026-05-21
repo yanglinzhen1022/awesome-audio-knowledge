@@ -184,7 +184,7 @@ AAOS 定义了 12+ 个 Context 用于精细化路由：
 
 ```mermaid
 graph LR
-    subgraph Safety_Path ["安全音直通路径"]
+    subgraph Safety_Path ["安全音直通路径(QNX)"]
         MCU["车身 MCU<br/>(ASIL-B 认证)"] -->|I2S / GPIO| EDSP["外置 DSP"]
         EDSP -->|混入| AMP["功放"]
     end
@@ -203,7 +203,7 @@ graph LR
 - 端到端延迟 < 5ms
 - 满足功能安全 ASIL-B/D 要求
 - MCU 独立控制，Android 挂死不影响安全音
-
+- CHIME音需要通知安卓侧音源进行DUCK
 ---
 
 ## 4. 车载音频专用功能

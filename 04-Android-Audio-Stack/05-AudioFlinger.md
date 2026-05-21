@@ -27,6 +27,7 @@ AudioPolicyManager::initialize()
   → openOutput()
     → AudioFlinger::openOutput_l()
       → 根据 flags 创建对应线程类型
+        ->非deepbuffer线程会同时再创建fastmixer
 ```
 
 创建线程时的 flag 映射：
@@ -37,6 +38,10 @@ AudioPolicyManager::initialize()
 | `AUDIO_OUTPUT_FLAG_FAST` | MixerThread (低延迟) |
 | `AUDIO_OUTPUT_FLAG_DIRECT` | DirectOutputThread |
 | `AUDIO_OUTPUT_FLAG_COMPRESS_OFFLOAD` | OffloadThread |
+| `AUDIO_OUTPUT_FLAG_MMAP_NOIRQ` | MmapPlaybackThread |
+| `AUDIO_OUTPUT_FLAG_SPATIALIZER` | SpatializerThread |
+| `AUDIO_OUTPUT_FLAG_BIT_PERFECT` | BitPerfectThread |
+
 
 ---
 
@@ -53,6 +58,8 @@ AudioFlinger 为每个物理输出设备创建一个线程实例。
 | **RecordThread** | - | **录音线程**。从 HAL 读取数据，分发给各 RecordTrack。 |
 | **MmapPlaybackThread** | `MMAP_NOIRQ` | **MMAP 播放**。AAudio 独占模式，应用直写 DMA Buffer。 |
 | **MmapCaptureThread** | `MMAP_NOIRQ` | **MMAP 录音**。AAudio 独占模式，应用直读 DMA Buffer。 |
+| **SpatializerThread** | `SPATIALIZER` | **空间音频播放**。空间音频专用线程，自动附加虚拟化效果。 |
+| **BitPerfectThread** | `BIT_PERFECT` | **直通播放**。位完美播放（基于 MixerThread），尽量无处理直通。 |
 
 ### 2.1 线程与 Output 的对应关系
 
@@ -417,9 +424,30 @@ graph LR
     SP --> |"obtainBuffer() 读取"| BUF
     SP --> TRK
     CP -.-> |"原子操作更新"| CB
-    SP -.-> |"原子操作更新"| CB
-```
+    SP -.-> |"原子操作更新"| CB 
 
+```
+```c++
+// ===AF和APP之间 cblk关键结构体 volatile和android_atomic_acquire_load保证无锁队列==
+struct AudioTrackSharedStreaming {
+    // similar to NBAIO MonoPipe
+    // in continuously incrementing frame units, take modulo buffer size, which must be a power of 2
+    volatile int32_t mFront;    // read by consumer (output: server, input: client)
+    volatile int32_t mRear;     // written by producer (output: client, input: server)
+    volatile int32_t mFlush;    // incremented by client to indicate a request to flush;
+                                // server notices and discards all data between mFront and mRear
+    volatile int32_t mStop;     // set by client to indicate a stop frame position; server
+                                // will not read beyond this position until start is called.
+    volatile uint32_t mUnderrunFrames; // server increments for each unavailable but desired frame
+    volatile uint32_t mUnderrunCount;  // server increments for each underrun occurrence
+};
+
+APP： front = android_atomic_acquire_load(&cblk->u.mStreaming.mFront);  //获取读指针
+      rear = cblk->u.mStreaming.mRear;
+
+AF：  rear = android_atomic_acquire_load(&mCblk->u.mStreaming.mRear);//获取写指针
+      front = cblk->u.mStreaming.mFront;
+```
 ### 8.2 Proxy 的原子操作
 
 *   `obtainBuffer()`：申请一块可写/可读的内存
