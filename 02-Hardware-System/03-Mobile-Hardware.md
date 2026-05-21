@@ -316,7 +316,7 @@ graph TD
 | **NXP → Goodix** | TFA9874, TFA9878 | I2S + I2C | 双通道, IV-Sense EQ | 华为/三星 |
 | **Maxim (ADI)** | MAX98390, MAX98396 | I2S + I2C | 集成 DSP, 热保护 | Google Pixel/联想 |
 | **艾为电子 (Awinic)** | AW882xx, AW883xx | I2S + I2C | 国产, 性价比 | 小米/荣耀/传音 |
-| **富芮坤 (FREQCHIP)** | FS19xx | I2S + I2C | 国产, 车规认证 | 车载 Tier 1 |
+| **傅里叶 (FOURSEMI)** | FS19xx | I2S + I2C | 国产, 车规认证 | 车载 Tier 1 |
 
 ### 8.3 典型手机音频方案
 
