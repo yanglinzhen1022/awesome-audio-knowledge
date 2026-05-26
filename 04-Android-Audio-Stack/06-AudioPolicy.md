@@ -974,7 +974,304 @@ Android 10+ 允许多个 App 同时录音, 但有优先级规则:
     → 被静音的 App 收到 onSilenceChanged(true) 回调
 ```
 
-### 5.4 录音场景实例分析
+### 5.4 同 Source 多 AudioRecord 并发的完整实现机制
+
+以 K歌 场景为例：同一个 App 内创建两个 AudioRecord，都使用 `SOURCE_MIC`：
+- **AudioRecord A**: 送算法做实时音高检测 / 变声处理
+- **AudioRecord B**: 录制原始人声用于打分 / 回放
+
+```
+═══════════════════════════════════════════════════════════════════
+核心问题: 两个 AudioRecord 请求相同的 source + device，
+         AudioPolicy 和 AudioFlinger 各做了什么？
+═══════════════════════════════════════════════════════════════════
+
+答案的关键: AudioPolicy 层面可能复用同一个 Input，
+           也可能打开两个独立 Input —— 取决于参数是否兼容。
+           AudioFlinger 层面的 RecordThread 天然支持多 Client。
+
+下面按完整时序展开：
+```
+
+#### 5.4.1 AudioRecord A 创建 (第一个录音)
+
+```
+App 调用: new AudioRecord(source=MIC, rate=48000, format=PCM_16BIT, channel=MONO)
+  ↓ Binder
+AudioPolicyService::getInputForAttr(attr_A, ...)
+  ↓
+AudioPolicyManager::getInputForAttr()
+  │
+  ├── Step 1: mEngine->getInputDeviceForAttributes(attr_A)
+  │     → source=MIC → BUILTIN_MIC
+  │
+  ├── Step 2: 权限+并发检查
+  │     → 当前无其他录音, 无冲突
+  │
+  ├── Step 3: getInputProfile(BUILTIN_MIC, 48000, PCM_16BIT, MONO, flags=0)
+  │     → 遍历 audio_policy_configuration.xml 的 <inputPorts>
+  │     → 匹配到 IOProfile "primary input"
+  │
+  ├── Step 4: 当前没有可复用的 Input → 新建
+  │     mpClientInterface->openInput(module, &input_handle_1, ...)
+  │       → AudioFlinger::openInput_l()
+  │         → 创建 RecordThread (thread_1)
+  │         → HAL stream_in->open(BUILTIN_MIC, 48000, PCM_16BIT, MONO)
+  │         → 返回 audio_io_handle_t = 42
+  │
+  ├── Step 5: 创建 AudioInputDescriptor (inputDesc_1)
+  │     inputDesc_1->mIOHandle = 42
+  │     inputDesc_1->mDevice = BUILTIN_MIC
+  │     inputDesc_1->mProfile = "primary input"
+  │     mInputs.add(42, inputDesc_1)
+  │
+  └── Step 6: 注册客户端
+        clientDesc_A = new RecordClientDescriptor(uid, session_A, source=MIC, ...)
+        inputDesc_1->addClient(clientDesc_A)
+        → 返回 input=42 给 App
+
+App 拿到 input=42:
+  → AudioFlinger::createRecord(input=42, ...)
+    → RecordThread(42)->createRecordTrack_l(...)
+      → 创建 RecordTrack_A (分配 Ashmem 共享内存)
+      → track_A 加入 RecordThread 的 mTracks
+  → App 调用 AudioRecord.startRecording()
+    → track_A 变 ACTIVE
+    → track_A 加入 mActiveTracks
+```
+
+#### 5.4.2 AudioRecord B 创建 (第二个录音, 同 source)
+
+```
+App 调用: new AudioRecord(source=MIC, rate=48000, format=PCM_16BIT, channel=MONO)
+  ↓ Binder
+AudioPolicyManager::getInputForAttr()
+  │
+  ├── Step 1: 同样得到 BUILTIN_MIC
+  │
+  ├── Step 2: 并发检查
+  │     → 检查已有 Client: clientDesc_A (同 App, 同 uid, 前台)
+  │     → 同 App + 同 source + 同 device → 允许并发
+  │     → 两者优先级相同 → 都不被 silenced
+  │
+  ├── Step 3: getInputProfile() → 同样匹配到 "primary input"
+  │
+  ├── ★ Step 4: 关键判断 — 是否复用已有 Input?
+  │
+  │   AudioPolicyManager 遍历 mInputs, 找到 inputDesc_1:
+  │     条件检查:
+  │       ✓ inputDesc_1->mProfile == 匹配到的 IOProfile
+  │       ✓ inputDesc_1->mDevice == BUILTIN_MIC (同设备)
+  │       ✓ inputDesc_1 的采样参数兼容 (同采样率/格式/声道)
+  │       ✓ inputDesc_1 未处于关闭状态
+  │     → 全部满足 → 复用! 不需要 openInput()
+  │
+  │   ⚠ 如果参数不兼容 (如 B 要 16000Hz 而 A 已占用 48000Hz):
+  │     → 无法复用 → 新建第二个 Input (openInput → 新的 RecordThread)
+  │     → HAL 层面看到两个 stream_in 同时打开同一个 MIC
+  │     → 是否支持取决于 HAL 实现 (大多数平台支持, ADSP 内部 fan-out)
+  │
+  ├── Step 5: (复用场景) 只添加 Client, 不新建 Input
+  │     clientDesc_B = new RecordClientDescriptor(uid, session_B, source=MIC, ...)
+  │     inputDesc_1->addClient(clientDesc_B)
+  │     → 返回 input=42 (与 A 相同!)
+  │
+  └── 结果: inputDesc_1 现在有两个 Client: [clientDesc_A, clientDesc_B]
+
+App 拿到 input=42:
+  → AudioFlinger::createRecord(input=42, ...)
+    → RecordThread(42)->createRecordTrack_l(...)
+      → 创建 RecordTrack_B (独立的 Ashmem 共享内存)
+      → track_B 也加入 RecordThread(42) 的 mTracks
+  → App 调用 AudioRecord.startRecording()
+    → track_B 变 ACTIVE, 加入 mActiveTracks
+```
+
+#### 5.4.3 RecordThread 如何同时服务多个 RecordTrack
+
+```
+此时 RecordThread(42) 的状态:
+  mActiveTracks = [track_A, track_B]
+  mInput = HAL stream_in (BUILTIN_MIC, 48000Hz)
+
+═══════════════════════════════════════════════════════════════════
+RecordThread::threadLoop() — 每个周期 (~20ms):
+═══════════════════════════════════════════════════════════════════
+
+  ① 从 HAL 读取一批 PCM 帧:
+     mInput->read(mRsmpInBuffer, mBufferSize)
+       → HAL 返回 960 frames (20ms @ 48kHz)
+       → mRsmpInBuffer 中是这 20ms 的原始 MIC 数据
+
+  ② 遍历每个活跃 RecordTrack, 分别"分发"数据:
+
+     for (sp<RecordTrack>& track : mActiveTracks) {
+       
+       // 2a. 检查此 Track 是否需要重采样
+       //     (如果 Track 请求 16000Hz 而 HAL 是 48000Hz)
+       if (track->needsResampling()) {
+           mResampler->resample(track->mRsmpOutBuffer, ...)
+           sourceBuffer = track->mRsmpOutBuffer
+       } else {
+           sourceBuffer = mRsmpInBuffer  // 直接使用原始数据
+       }
+       
+       // 2b. 检查此 Track 是否被 silenced (并发优先级低)
+       if (track->isSilenced()) {
+           memset(trackBuffer, 0, size)   // 注入静音
+       } else {
+           memcpy(trackBuffer, sourceBuffer, size)  // 复制真实数据
+       }
+       
+       // 2c. 写入此 Track 的共享内存
+       track->releaseBuffer(&buffer)
+         → 更新 AudioRecordServerProxy 的写指针
+         → App 侧的 AudioRecordClientProxy 检测到新数据可读
+     }
+
+  ③ 结果:
+     track_A 的共享内存: [20ms 真实 MIC 数据] ← App 的算法线程读取
+     track_B 的共享内存: [20ms 真实 MIC 数据] ← App 的录制线程读取
+     两者拿到的是**同一份** HAL 数据的**独立副本**
+
+═══════════════════════════════════════════════════════════════════
+内存视角:
+═══════════════════════════════════════════════════════════════════
+
+  HAL stream_in (硬件)
+       │ read()
+       ▼
+  ┌─────────────────┐
+  │  mRsmpInBuffer   │  ← RecordThread 的内部缓冲 (只有一份)
+  │  [960 frames]    │
+  └─────┬─────┬─────┘
+        │     │
+   memcpy    memcpy     ← 每个 Track 独立复制
+        │     │
+        ▼     ▼
+  ┌─────────┐ ┌─────────┐
+  │ Track_A  │ │ Track_B  │
+  │ Ashmem   │ │ Ashmem   │  ← 独立的环形缓冲区 (Ashmem 共享内存)
+  │ [cblk+buf]│ │ [cblk+buf]│
+  └─────┬────┘ └─────┬────┘
+        │            │
+        ▼            ▼
+   App 算法线程  App 录制线程   ← 各自通过 AudioRecordClientProxy 读取
+   (音高检测)   (打分/存储)
+```
+
+#### 5.4.4 K歌场景的参数差异处理
+
+```
+实际 K歌中, 两个 AudioRecord 可能参数不同:
+
+  AudioRecord A (算法): source=MIC, rate=16000, MONO    ← 算法只需低采样率
+  AudioRecord B (录制): source=MIC, rate=48000, STEREO  ← 录制需要高质量
+
+这时候会发生什么?
+
+  ★ 情况 1: 两个 AudioRecord 复用同一个 Input (HAL 48000Hz)
+    
+    getInputForAttr(B) 发现 inputDesc_1 已存在:
+      → inputDesc_1 HAL 采样率 = 48000, Track B 请求 48000 → 兼容
+      → 但 Track A 请求 16000 → 需要重采样
+    
+    RecordThread 处理:
+      HAL read: 48000Hz 原始数据
+        → Track A: RecordBufferConverter 做 48000→16000 重采样 + stereo→mono
+        → Track B: 直接 memcpy (参数一致, 无需转换)
+    
+    注意: RecordThread 打开 HAL 时选择"最高规格":
+      多个 Client 中取 max(sampleRate), max(channelCount)
+      确保不丢失精度, 低规格 Track 通过 RecordBufferConverter 下采样
+
+  ★ 情况 2: 两个 AudioRecord 使用不同 Input
+    
+    如果 IOProfile 不兼容 (如 A 需要 FAST flag, B 不需要):
+      → AudioPolicy 为 B 打开第二个 Input (input_handle_2 = 43)
+      → AudioFlinger 创建第二个 RecordThread(43)
+      → HAL 层面有两个 stream_in 同时打开 BUILTIN_MIC
+      → ADSP 内部做 fan-out (同一路 MIC → 分发给两个 stream)
+    
+    架构图:
+      BUILTIN_MIC → ADSP → stream_in_1 → RecordThread(42) → Track_A
+                        └→ stream_in_2 → RecordThread(43) → Track_B
+```
+
+#### 5.4.5 AudioInputDescriptor 的 Client 管理
+
+```
+AudioInputDescriptor 是 AudioPolicy 管理录音 Input 的核心数据结构:
+
+class AudioInputDescriptor {
+    audio_io_handle_t mIOHandle;        // AudioFlinger 返回的 handle
+    sp<IOProfile>     mProfile;         // 对应的 HwModule IOProfile
+    DeviceVector      mDevices;         // 当前使用的录音设备
+    
+    // ★ 关键: 多 Client 管理
+    RecordClientMap   mClients;         // uid → RecordClientDescriptor 列表
+    
+    // 获取活跃 Client 中最高优先级的 source
+    audio_source_t getHighestPrioritySource();
+    
+    // 检查是否有活跃的 Client
+    bool isActive() const;
+    
+    // 获取某 Client 是否应该被 silenced
+    bool isSilenced(uid_t uid) const;
+};
+
+RecordClientDescriptor 记录每个 AudioRecord:
+  - uid:       App 的 UID
+  - session:   AudioSession ID (唯一标识)
+  - source:    AudioSource (MIC/VOICE_RECOGNITION/...)
+  - flags:     AUDIO_INPUT_FLAG_FAST / AUDIO_INPUT_FLAG_MMAP_NOIRQ / ...
+  - silenced:  是否被静音
+  - portId:    AudioPort ID (唯一)
+  - active:    是否正在录音
+
+当 inputDesc 有多个 Client 时:
+  - 如果某 Client stop() → 从 activeClients 移除, 但 Client 仍在 mClients 中
+  - 如果某 Client 释放 → removeClient(), 从 mClients 删除
+  - 最后一个 Client 移除时 → APM 调用 closeInput() → AudioFlinger 销毁 RecordThread
+```
+
+#### 5.4.6 同 App 同 Source 并发 vs 跨 App 并发的区别
+
+```
+┌──────────────────────┬────────────────────────┬────────────────────────┐
+│                      │ 同 App 内多 AudioRecord │ 不同 App 多 AudioRecord │
+├──────────────────────┼────────────────────────┼────────────────────────┤
+│ UID                  │ 相同                    │ 不同                    │
+│ 是否需要并发权限      │ 不需要                  │ Android 10+ 框架允许    │
+│ 优先级冲突            │ 不会 (同 uid 同等优先级)│ 按规则 silenced         │
+│ Input 复用            │ 通常复用 (参数兼容时)   │ 同样可复用              │
+│ 数据独立性            │ 各自独立 Ashmem Buffer  │ 各自独立 Ashmem Buffer  │
+│ 一方关闭影响另一方?   │ 不影响                  │ 不影响                  │
+│ 被静音情况            │ 不会互相静音            │ 低优先级方被静音        │
+│ K歌典型场景           │ 算法 + 录制 (本节重点) │ K歌 App + 语音助手       │
+└──────────────────────┴────────────────────────┴────────────────────────┘
+
+K歌 App 最佳实践:
+  1. 两个 AudioRecord 用相同参数 (48000Hz, MONO, PCM_16BIT)
+     → 保证复用同一个 Input, 无额外 HAL 资源开销
+     → 算法端如果只需 16000Hz, 在 App 层做下采样 (比 HAL 层更可控)
+  
+  2. 如果必须不同参数:
+     → 第一个用 48000Hz 高质量, 第二个也用 48000Hz
+     → 避免让 AudioPolicy 被迫开两个 Input (浪费 ADSP 资源)
+  
+  3. 推荐使用 VOICE_PERFORMANCE source:
+     → 低延迟路径, 不自动加 AEC/NS
+     → 人声原汁原味, 适合后期 App 自己加效果
+  
+  4. 如果需要精确同步两个 AudioRecord 的时间戳:
+     → 因为复用同一个 RecordThread, 两个 Track 在同一个 threadLoop
+        周期内被填充数据 → 天然帧对齐 (同一批 HAL read 数据)
+     → 跨 Input 场景则需要用 AudioTimestamp 做对齐
+```
+
+### 5.5 录音场景实例分析
 
 ```
 场景 1: 语音助手唤醒 + 用户打开录音 App
