@@ -819,4 +819,15 @@ EOF
 ```
 
 ---
+
+## 相关章节
+
+AudioFlinger 是音频执行层，以下主题在专门章节中深入展开：
+
+- **音效处理框架**：EffectChain/EffectModule 如何加载、挂载到 Thread 及 Buffer 传递 → [08-AudioEffect.md](./08-AudioEffect.md)
+- **录音详细流程**：AudioRecord 创建 → RecordThread 数据分发全链路 → [04-AudioRecord.md](./04-AudioRecord.md)
+- **MMAP/AAudio 低延迟路径**：MmapPlaybackThread / MmapCaptureThread 独占 DMA 机制 → [10-Oboe-AAudio.md](./10-Oboe-AAudio.md)
+- **路由决策与设备管理**：AudioPolicy 如何选择 Output/Device 并通知 AudioFlinger → [06-AudioPolicy.md](./06-AudioPolicy.md)
+
+---
 *Next Topic: [AudioPolicy 策略管理深度解析](./06-AudioPolicy.md)*

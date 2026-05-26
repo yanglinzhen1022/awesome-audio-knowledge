@@ -259,79 +259,13 @@ enginedefault/
 │   └── AudioPolicyEngineInstance.h
 └── Android.bp                        → 编译为 libaudiopolicyenginedefault.so
 
-Engine.cpp 关键函数: getDevicesForProductStrategy()
+核心函数:
+  - getDevicesForProductStrategy()   ← 播放设备选择 (按 Strategy 分支)
+  - getDeviceForInputSource()        ← 录音设备选择 (按 Source 分支)
 
-  该函数是一个巨大的 switch-case, 按 Strategy 分支选设备:
-
-  ┌─────────────────────────────────────────────────────────────┐
-  │ STRATEGY_PHONE (电话通话):                                    │
-  │   ForceUse(FOR_COMMUNICATION) == FORCE_BT_SCO?              │
-  │     → BT_SCO_HEADSET (蓝牙免提)                              │
-  │   ForceUse(FOR_COMMUNICATION) == FORCE_SPEAKER?             │
-  │     → SPEAKER (免提模式)                                     │
-  │   连接了有线耳机?                                             │
-  │     → WIRED_HEADSET                                          │
-  │   连接了 USB 耳机?                                            │
-  │     → USB_HEADSET                                            │
-  │   → EARPIECE (听筒, 默认)                                    │
-  ├─────────────────────────────────────────────────────────────┤
-  │ STRATEGY_MEDIA (媒体播放):                                    │
-  │   连接了 Hearing Aid?                                        │
-  │     → HEARING_AID                                            │
-  │   连接了 BT A2DP 且 ForceUse != FORCE_NO_BT_A2DP?           │
-  │     → BT_A2DP                                                │
-  │   连接了有线耳机?                                             │
-  │     → WIRED_HEADSET / WIRED_HEADPHONE                        │
-  │   连接了 USB?                                                 │
-  │     → USB_DEVICE / USB_HEADSET                               │
-  │   → SPEAKER (扬声器, 默认)                                   │
-  ├─────────────────────────────────────────────────────────────┤
-  │ STRATEGY_SONIFICATION (通知/铃声):                            │
-  │   → SPEAKER (强制) + getDevicesForStrategy(MEDIA) (双输出)   │
-  │   例: 耳机 + 扬声器同时出声                                   │
-  ├─────────────────────────────────────────────────────────────┤
-  │ STRATEGY_SONIFICATION_RESPECTFUL (低优先级通知):              │
-  │   有活跃 MEDIA 流? → 跟随 MEDIA 设备                         │
-  │   否则 → 跟随 SONIFICATION 逻辑                              │
-  ├─────────────────────────────────────────────────────────────┤
-  │ STRATEGY_DTMF (拨号音):                                      │
-  │   → 跟随 STRATEGY_PHONE 的设备                               │
-  ├─────────────────────────────────────────────────────────────┤
-  │ STRATEGY_ENFORCED_AUDIBLE (强制可听, 如快门声):               │
-  │   → SPEAKER (无论是否连接耳机都从扬声器出声)                  │
-  └─────────────────────────────────────────────────────────────┘
-
-Engine.cpp 录音设备选择: getDeviceForInputSource()
-
-  ┌─────────────────────────────────────────────────────────────┐
-  │ AUDIO_SOURCE_MIC (默认麦克风):                                │
-  │   → BUILTIN_MIC (主 MIC)                                    │
-  ├─────────────────────────────────────────────────────────────┤
-  │ AUDIO_SOURCE_VOICE_COMMUNICATION (VoIP):                    │
-  │   ForceUse(FOR_COMMUNICATION) == FORCE_BT_SCO?              │
-  │     → BT_SCO_HEADSET (蓝牙 HFP 麦克风)                      │
-  │   连接了有线耳机?                                             │
-  │     → WIRED_HEADSET (耳机自带 MIC)                           │
-  │   → BUILTIN_MIC                                              │
-  ├─────────────────────────────────────────────────────────────┤
-  │ AUDIO_SOURCE_VOICE_RECOGNITION (语音识别):                   │
-  │   连接了 BT SCO 且支持语音识别?                               │
-  │     → BT_SCO_HEADSET                                         │
-  │   连接了有线耳机?                                             │
-  │     → WIRED_HEADSET                                          │
-  │   → BUILTIN_MIC                                              │
-  ├─────────────────────────────────────────────────────────────┤
-  │ AUDIO_SOURCE_CAMCORDER (摄像录音):                           │
-  │   → BACK_MIC (后置 MIC, 靠近摄像头)                          │
-  │   无后置 MIC → BUILTIN_MIC                                   │
-  ├─────────────────────────────────────────────────────────────┤
-  │ AUDIO_SOURCE_VOICE_UPLINK / DOWNLINK (通话录音):             │
-  │   → TELEPHONY_RX (电话下行) / BUILTIN_MIC (上行)             │
-  │   需要 CAPTURE_AUDIO_OUTPUT 权限                             │
-  ├─────────────────────────────────────────────────────────────┤
-  │ AUDIO_SOURCE_UNPROCESSED (原始未处理):                       │
-  │   → BUILTIN_MIC (不应用 3A 算法)                             │
-  └─────────────────────────────────────────────────────────────┘
+两者均为巨大的 switch-case, 基于 ForceUse + 已连接设备 做优先级判断。
+→ 播放设备选择详解见 §4.4
+→ 录音设备选择 AOSP 源码分析见 §5.2.1
 ```
 
 ### 2.5 engineconfigurable/ — 可配置引擎 (PFW)
@@ -347,53 +281,9 @@ engineconfigurable/
 │   └── ParameterManagerWrapper.cpp   ← 封装 PFW 的 C++ 接口
 └── Android.bp                        → 编译为 libaudiopolicyengineconfigurable.so
 
-PFW (Parameter Framework) 运行架构:
-
-  ┌─────────────────────────────────────────────────────────┐
-  │  audio_policy_engine_configuration.xml                  │
-  │    ├── ProductStrategies: 定义策略 ↔ Attributes 映射    │
-  │    ├── Criteria: 决策条件变量                             │
-  │    ├── CriterionTypes: 条件变量的取值枚举                 │
-  │    └── 引用外部 PFW 配置文件                              │
-  └──────────────────┬──────────────────────────────────────┘
-                     ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  PFW Settings XML (Domains + Rules)                     │
-  │                                                         │
-  │  Domain: SelectedOutputDevice.Media                     │
-  │    Conf: BtA2dp                                         │
-  │      Rule: AvailableOutputDevices includes BT_A2DP      │
-  │            AND ForceUseForMedia != FORCE_NO_BT_A2DP     │
-  │      → Parameter: SelectedDevice = BT_A2DP              │
-  │    Conf: WiredHeadset                                   │
-  │      Rule: AvailableOutputDevices includes WIRED_HEADSET│
-  │      → Parameter: SelectedDevice = WIRED_HEADSET        │
-  │    Conf: Default                                        │
-  │      → Parameter: SelectedDevice = SPEAKER              │
-  └──────────────────┬──────────────────────────────────────┘
-                     ▼
-  ┌─────────────────────────────────────────────────────────┐
-  │  ParameterManagerWrapper                                │
-  │    每次设备变化 / ForceUse 变化:                          │
-  │    1. setCriterionValue("AvailableOutputDevices",       │
-  │                          SPEAKER|BT_A2DP|...)           │
-  │    2. applyConfiguration()  → PFW 执行规则匹配           │
-  │    3. 读取 Parameter 结果 → 返回 SelectedDevice          │
-  └─────────────────────────────────────────────────────────┘
-
-Criteria 完整示例:
-  AvailableOutputDevices:  SPEAKER|WIRED_HEADSET|BT_A2DP (bitmask)
-  AvailableInputDevices:   BUILTIN_MIC|WIRED_HEADSET|BT_SCO (bitmask)
-  TelephonyMode:           NORMAL / RINGTONE / IN_CALL / IN_COMMUNICATION
-  ForceUseForCommunication: FORCE_NONE / FORCE_SPEAKER / FORCE_BT_SCO
-  ForceUseForMedia:         FORCE_NONE / FORCE_NO_BT_A2DP / FORCE_SPEAKER
-  ForceUseForRecord:        FORCE_NONE / FORCE_BT_SCO
-  ForceUseForDock:          FORCE_NONE / FORCE_ANALOG_DOCK / FORCE_DIGITAL_DOCK
-
-适用场景:
-  ✅ AAOS 车载: 复杂多音区路由, OEM 需灵活定制
-  ✅ 需要在不重编译的情况下调整路由规则
-  ❌ 配置复杂, 调试需理解 PFW 框架
+通过 Parameter Framework (PFW) 将路由决策外部化为 XML 规则, 无需改 C++ 代码。
+适用于 AAOS 车载多音区等需要灵活定制路由的场景。
+→ PFW 完整架构、Criteria、Rules 配置详解见 §4.5
 ```
 
 ### 2.6 common/ — 公共数据结构
@@ -460,11 +350,7 @@ config/
       → 解析 <routes>  → AudioRoute 对象 (建立 mixPort↔devicePort 拓扑)
       → 解析 <xi:include> → 合并多个分片 XML
 
-配置文件搜索优先级:
-  1. /odm/etc/audio_policy_configuration.xml
-  2. /vendor/etc/audio/sku_<variant>/audio_policy_configuration.xml
-  3. /vendor/etc/audio_policy_configuration.xml
-  4. /system/etc/audio_policy_configuration.xml
+配置文件搜索优先级: 见 §10.1
 ```
 
 ---
@@ -1895,6 +1781,58 @@ audioPolicyManager->createAudioPatch(&patch, &patchHandle);
 // 硬件直连, 不经过 AudioFlinger 混音
 ```
 
+### 8.2 Dynamic Policy Mix (`registerAudioPolicy`)
+
+Android 5.0+ 引入的动态策略机制，允许**特权 App 在运行时拦截/重定向音频流**，而无需修改 AudioPolicy 配置文件。
+
+**核心 API：**
+```java
+// frameworks/base/media/java/android/media/audiopolicy/AudioPolicy.java
+AudioPolicy policy = new AudioPolicy.Builder(context)
+    .addMix(new AudioMix.Builder(mixingRule)
+        .setRouteFlags(AudioMix.ROUTE_FLAG_LOOP_BACK)  // 回环到 App
+        .setFormat(new AudioFormat.Builder()
+            .setSampleRate(48000)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+            .build())
+        .build())
+    .build();
+
+// 注册后, 匹配规则的音频流会被路由到此 Policy 的虚拟设备
+audioManager.registerAudioPolicy(policy);
+```
+
+**内部机制：**
+```
+App 调用 registerAudioPolicy()
+  → AudioService → AudioPolicyService::registerPolicyMixes()
+    → AudioPolicyManager::registerPolicyMixes()
+      → 创建 AudioPolicyMix 对象, 加入 mPolicyMixes 列表
+      → 创建虚拟 REMOTE_SUBMIX 设备 (有唯一地址)
+      → openOutput() → AudioFlinger 创建 MixerThread
+      
+后续 getOutputForAttr() 检查每个流:
+  → 如果 AudioAttributes 匹配 MixingRule 的 criteria
+    → 路由到 PolicyMix 的虚拟 REMOTE_SUBMIX output
+    → 注册 App 通过 REMOTE_SUBMIX input 读取数据
+
+MixingRule 匹配条件 (可组合):
+  - Usage:       USAGE_MEDIA / USAGE_GAME / ...
+  - UID:         特定 App 的音频流
+  - Session ID:  特定 AudioTrack 的 session
+```
+
+**典型应用场景：**
+
+| 场景 | 使用方式 |
+|:---|:---|
+| **屏幕录制** (Screen Capture) | `ROUTE_FLAG_LOOP_BACK` 拦截所有 MEDIA 音频回环到录屏 App |
+| **语音助手** | 拦截 MIC 输入流做 ASR (自动语音识别) |
+| **车载音频隔离** | 按 UID 将不同 App 音频路由到不同 Bus |
+| **监听/审计** | 系统级 App 监听特定 Usage 的音频流 |
+
+**权限要求：** 需要 `MODIFY_AUDIO_ROUTING` 系统权限（仅系统签名 App / 特权 App 可使用）。
+
 ---
 
 ## 9. AAOS 车载特殊策略
@@ -2016,6 +1954,17 @@ adb shell input keyevent KEYCODE_HEADSETHOOK
 # 查看实时路由变化 (结合 logcat)
 adb logcat -s AudioPolicyManager:V AudioPolicyService:V
 ```
+
+---
+
+## 相关章节
+
+AudioPolicy 是音频决策层，以下相关主题在专门章节中深入展开：
+
+- **AudioFlinger 执行层**：线程模型、混音引擎、Track 生命周期、共享内存机制 → [05-AudioFlinger.md](./05-AudioFlinger.md)
+- **音效自动挂载**：AudioPolicyEffects 根据 source/stream 自动添加效果的完整机制 → [08-AudioEffect.md](./08-AudioEffect.md)
+- **音频焦点仲裁**：多 App 音频冲突的焦点栈管理与 Duck/Fade 执行 → [09-AudioFocus.md](./09-AudioFocus.md)
+- **VoIP/通话链路**：通话场景下 AudioPolicy 路由与 3A 处理的端到端流程 → [11-VoIP-Call-Chain.md](./11-VoIP-Call-Chain.md)
 
 ---
 *Next Topic: [Audio HAL 接口规范](./07-AudioHAL.md)*
