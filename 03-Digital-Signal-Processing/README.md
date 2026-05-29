@@ -32,6 +32,13 @@
     *   语音通信：AMR-WB、EVS、Opus。
     *   沉浸式：Dolby AC-4、MPEG-H、IAMF。
 
+7.  **[音频编解码帧结构深度解析 (Codec Frame Deep Dive)](./07-Codec-Frame-Deep-Dive.md)**
+    *   AAC：ADTS 帧头逐字段解析、MDCT 编码工具链、Raw Frame 内部结构、HE-AAC SBR 扩展。
+    *   Opus：TOC Byte 解析、SILK 语音核心 (LP/LTP/Range coding)、CELT 音乐核心 (MDCT/PVQ)、Hybrid 模式。
+    *   LC3：SNS 频谱整形、Dead-zone 量化、帧比特流格式、LC3 vs SBC vs AAC 帧级对比。
+    *   RTP 音频打包：RFC 7587 (Opus) / RFC 3640 (AAC) 打包格式与 SDP 示例。
+    *   实战：Python ADTS/Opus 帧解析脚本、ffprobe 分析、btsnoop LC3 抓取。
+
 6.  **[AI 音频处理 (AI-Powered Audio)](./06-AI-Audio.md)**
     *   AI 降噪：RNNoise / DTLN / DCCRN 等模型架构与对比。
     *   AI 回声消除：NN-AEC 原理与混合 Pipeline。

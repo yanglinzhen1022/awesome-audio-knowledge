@@ -43,6 +43,10 @@
     *   VoIP App 架构与 AudioAttributes 配置。
     *   通话 3A 处理（AEC/NS）与 Jitter Buffer。
     *   通话质量评估指标与调试命令。
+12. **[Android 音频版本新特性 (Version Changelog)](./12-Android-New-Features.md)**
+    *   Android 14：Loudness CTA-2075 响度控制、Spatializer AIDL 稳定化、Ultra HDR Audio 路径。
+    *   Android 15：Audio Sharing (Auracast)、Per-App 响度、MMAP Shared 增强、Virtual Audio Device。
+    *   历史关键版本里程碑回顾（Android 5.0 ~ 15）。
 
 ---
 [返回主目录](../README.md)

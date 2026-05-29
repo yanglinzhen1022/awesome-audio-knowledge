@@ -323,7 +323,333 @@ graph LR
 
 ---
 
-## 10. 常见问题与专家级排查
+## 10. start() 启动流程 (play 到硬件播放)
+
+调用 `play()` 后的完整链路，从 Java 到硬件开始输出：
+
+### 10.1 调用栈源码解析
+
+```cpp
+// frameworks/av/media/libaudioclient/AudioTrack.cpp
+void AudioTrack::start() {
+    AutoMutex lock(mLock);
+    
+    if (mState == STATE_ACTIVE) return;  // 已经在播放
+    
+    mState = STATE_ACTIVE;
+    
+    // 如果之前是 STOPPED/FLUSHED，重置位置
+    if (previousState == STATE_STOPPED || previousState == STATE_FLUSHED) {
+        mPosition = 0;
+        mProxy->setEpoch(mProxy->getEpoch() - mProxy->getPosition());
+    }
+    
+    // 关键：通过 Binder 通知 AudioFlinger 侧激活 Track
+    status_t status = mAudioTrack->start();
+    
+    if (status != NO_ERROR) {
+        mState = previousState;  // 失败回滚
+    }
+}
+```
+
+### 10.2 Server 侧 (AudioFlinger) 处理
+
+```cpp
+// frameworks/av/services/audioflinger/Tracks.cpp
+status_t AudioFlinger::PlaybackThread::Track::start() {
+    // 1. 状态检查
+    if (isTerminated() || mState == PAUSING || mState == IDLE) {
+        return INVALID_OPERATION;
+    }
+    
+    // 2. 切换到 ACTIVE 状态
+    mState = ACTIVE;
+    
+    // 3. 加入所属 PlaybackThread 的活跃列表
+    PlaybackThread *playbackThread = (PlaybackThread *)thread.get();
+    status = playbackThread->addTrack_l(this);
+    
+    return status;
+}
+
+// frameworks/av/services/audioflinger/Threads.cpp
+status_t AudioFlinger::PlaybackThread::addTrack_l(const sp<Track>& track) {
+    // 加入 mActiveTracks
+    mActiveTracks.add(track);
+    
+    // 如果 Thread 处于 standby，唤醒它
+    if (mStandby) {
+        mWaitWorkCV.signal();  // 唤醒 threadLoop()
+    }
+    
+    return NO_ERROR;
+}
+```
+
+### 10.3 时序总结
+
+```
+App: track.play()
+  → AudioTrack::start()
+    → mAudioTrack->start() [Binder IPC]
+      → TrackHandle::start()
+        → Track::start()
+          → mState = ACTIVE
+          → PlaybackThread::addTrack_l(track)
+            → mActiveTracks.add(track)
+            → 唤醒 threadLoop() (如果在 standby)
+              → threadLoop() 开始从共享内存读取数据
+              → AudioMixer 混音
+              → HAL write() → 硬件输出声音
+```
+
+---
+
+## 11. Callback 回调机制与事件驱动模型
+
+### 11.1 Native Callback 事件类型
+
+```cpp
+// frameworks/av/media/libaudioclient/include/media/AudioTrack.h
+class AudioTrack {
+public:
+    enum event_type {
+        EVENT_MORE_DATA = 0,      // 需要更多数据 (callback mode 核心事件)
+        EVENT_UNDERRUN = 1,       // 缓冲区下溢
+        EVENT_LOOP_END = 2,       // 循环播放到末尾
+        EVENT_MARKER = 3,         // 到达设定的帧位置标记
+        EVENT_NEW_POS = 4,        // 位置更新通知 (周期性)
+        EVENT_BUFFER_END = 5,     // MODE_STATIC buffer 播放完毕
+        EVENT_NEW_IAUDIOTRACK = 6,// Track 被重建 (AudioFlinger 恢复后)
+        EVENT_STREAM_END = 7,     // Offload 模式: 流播放结束
+        EVENT_NEW_TIMESTAMP = 8,  // 新时间戳可用
+    };
+    
+    // 回调函数签名
+    typedef void (*callback_t)(int event, void* user, void* info);
+};
+```
+
+### 11.2 Callback 模式 vs Write 模式对比
+
+```cpp
+// === Write 模式 (MODE_STREAM + 手动 write) ===
+// App 负责在独立线程中循环调用 write()
+void playbackThread() {
+    track->play();
+    while (playing) {
+        track->write(buffer, size, WRITE_BLOCKING);  // 阻塞等待空间
+    }
+}
+
+// === Callback 模式 (数据回调) ===
+// AudioFlinger 在需要数据时主动回调 App
+void audioCallback(int event, void* user, void* info) {
+    if (event == AudioTrack::EVENT_MORE_DATA) {
+        AudioTrack::Buffer* buf = (AudioTrack::Buffer*)info;
+        // 填充 PCM 数据到 buf->raw
+        generateAudio(buf->raw, buf->size);
+        // 返回后 AudioFlinger 自动消费
+    }
+}
+
+// 创建 callback 模式的 AudioTrack
+sp<AudioTrack> track = new AudioTrack();
+track->set(AUDIO_STREAM_MUSIC, sampleRate, format, channelMask,
+           frameCount,
+           AUDIO_OUTPUT_FLAG_FAST,
+           audioCallback,    // 回调函数
+           userData,         // 回调上下文
+           0,               // notificationFrames (0=默认)
+           sharedBuffer,    // nullptr for STREAM mode
+           false,           // threadCanCallJava
+           sessionId);
+```
+
+### 11.3 Callback 线程模型
+
+```
+Callback 模式内部工作原理:
+
+  AudioTrack 内部创建 AudioTrackThread:
+    → 独立线程, 优先级 ANDROID_PRIORITY_AUDIO
+    → threadLoop() 中循环:
+      1. mProxy->obtainBuffer() — 等待可写空间
+      2. 调用 mCbf(EVENT_MORE_DATA, ...) — 回调 App 填数据
+      3. mProxy->releaseBuffer() — 提交数据
+
+  优势:
+    - App 无需管理写入线程
+    - 系统自动按 period 节奏请求数据
+    - 天然适合实时音频合成 (游戏/合成器)
+    
+  注意:
+    - 回调中不能做耗时操作 (阻塞/锁/malloc)
+    - 回调线程优先级高, 避免优先级反转
+```
+
+---
+
+## 12. MODE_STATIC vs MODE_STREAM 实现差异
+
+### 12.1 核心区别
+
+```
+MODE_STREAM:
+  App: write() → 环形 Buffer → AudioFlinger 持续消费
+  共享内存: 环形缓冲区 (固定大小, 循环覆写)
+  适用: 持续流式播放 (音乐/通话/游戏背景音)
+
+MODE_STATIC:
+  App: 一次性写入完整 buffer → play() → 硬件循环播放
+  共享内存: 线性 Buffer (一次性分配全部数据大小)
+  适用: 短促音效 (按键音/通知音/游戏打击音)
+```
+
+### 12.2 内部实现源码
+
+```cpp
+// frameworks/av/media/libaudioclient/AudioTrack.cpp
+
+// MODE_STATIC 的 buffer 分配
+status_t AudioTrack::set(...) {
+    if (mTransfer == TRANSFER_SHARED) {  // MODE_STATIC
+        // 分配整个音频大小的共享内存 (非环形)
+        mSharedBuffer = sharedBuffer;  // App 传入的 buffer
+        frameCount = mSharedBuffer->size() / mFrameSize;
+        // 不需要 AudioTrackClientProxy 的环形逻辑
+    }
+}
+
+// MODE_STATIC 的 write (一次性)
+ssize_t AudioTrack::write(const void* buffer, size_t size, ...) {
+    if (mTransfer == TRANSFER_SHARED) {
+        // 直接 memcpy 到共享内存起始位置
+        memcpy(mSharedBuffer->unsecurePointer(), buffer, size);
+        return size;  // 立即返回
+    }
+    // MODE_STREAM: 走环形 buffer 的 obtainBuffer/releaseBuffer
+    ...
+}
+```
+
+### 12.3 性能对比
+
+| 维度 | MODE_STREAM | MODE_STATIC |
+|:---|:---|:---|
+| 首次播放延迟 | 低 (边写边播) | 高 (需先写完所有数据) |
+| 重复播放延迟 | 高 (需重新填充) | **极低** (数据已在共享内存) |
+| 内存占用 | 小 (仅 buffer_size) | 大 (完整音频数据) |
+| CPU 占用 | 持续 (不断 write) | 极低 (play 后无需 CPU) |
+| 循环播放 | App 自行控制 | `setLoopPoints()` 硬件级循环 |
+| 适用时长 | 无限制 | 建议 < 5秒 (内存限制) |
+
+```java
+// MODE_STATIC 典型用法 (短音效)
+AudioTrack staticTrack = new AudioTrack.Builder()
+    .setAudioAttributes(attrs)
+    .setAudioFormat(format)
+    .setBufferSizeInBytes(totalPcmBytes)  // 完整音效大小
+    .setTransferMode(AudioTrack.MODE_STATIC)
+    .build();
+
+// 一次性写入
+staticTrack.write(pcmData, 0, pcmData.length);
+
+// 设置循环: 从头到尾循环 3 次
+staticTrack.setLoopPoints(0, totalFrames, 3);
+staticTrack.play();  // 无需再 write, 硬件自动循环
+```
+
+---
+
+## 13. restoreTrack_l() — AudioFlinger 崩溃恢复
+
+### 13.1 恢复机制
+
+当 `audioserver` 进程崩溃重启后，所有 AudioTrack 的 Binder 连接断开。Android 设计了自动恢复机制：
+
+```cpp
+// frameworks/av/media/libaudioclient/AudioTrack.cpp
+status_t AudioTrack::restoreTrack_l(const char *from) {
+    ALOGW("dead IAudioTrack, %s, creating a new one from %s()", 
+          isOffloadedOrDirect_l() ? "Offloaded or Direct" : "", from);
+    
+    // 1. 保存当前播放位置
+    uint32_t position = mPosition;
+    
+    // 2. 重新查询 AudioPolicy 获取 output
+    audio_io_handle_t output;
+    AudioSystem::getOutputForAttr(&mAttributes, &output, ...);
+    
+    // 3. 重新创建 Track (与初始化流程相同)
+    result = createTrack_l();
+    
+    if (result == NO_ERROR) {
+        // 4. 恢复播放位置
+        mProxy->setEpoch(mProxy->getEpoch() - mPosition);
+        
+        // 5. 如果之前在播放, 重新 start
+        if (mState == STATE_ACTIVE) {
+            mAudioTrack->start();
+        }
+        
+        // 6. 触发回调通知 App
+        // EVENT_NEW_IAUDIOTRACK 告知 App: Track 已重建
+    }
+    return result;
+}
+```
+
+### 13.2 触发时机
+
+```
+AudioFlinger 崩溃恢复时序:
+
+  audioserver 崩溃 (crash/kill/ANR watchdog)
+       │
+       ▼
+  system_server 检测到死亡 → 重新启动 audioserver
+       │
+       ▼
+  App 侧 AudioTrack 下次操作 (write/getTimestamp/...)
+    → Binder 调用失败 (DEAD_OBJECT)
+       │
+       ▼
+  restoreTrack_l() 被触发:
+    → 重新 getOutputForAttr() (可能路由已变化)
+    → 重新 createTrack_l() (新的共享内存)
+    → 恢复位置 & 状态
+    → 用户无感知 (最多有一次短暂中断 ~200ms)
+
+特殊情况:
+  - Offload Track: 无法恢复位置 (DSP 状态丢失), 需要 App 重新 seek
+  - Direct Track: 可能因设备变化无法恢复, 返回错误
+```
+
+### 13.3 App 侧感知
+
+```java
+// App 通常不需要处理恢复, 但可以监听:
+track.setPlaybackPositionUpdateListener(new AudioTrack.OnPlaybackPositionUpdateListener() {
+    @Override
+    public void onMarkerReached(AudioTrack track) { }
+    
+    @Override
+    public void onPeriodicNotification(AudioTrack track) {
+        // 如果 AudioFlinger 重启, 这个回调可能会有一次间断
+        // 正常情况下 App 无需额外处理
+    }
+});
+
+// Native 层 callback 会收到 EVENT_NEW_IAUDIOTRACK
+// 通知 App: Track 已被重建, 可能需要重新设置音量/音效等参数
+```
+
+---
+
+## 14. 常见问题与专家级排查
 
 | 问题 | 根因 | 解决方案 |
 |:---|:---|:---|
@@ -334,7 +660,7 @@ graph LR
 | **stop() 后有残响** | drain 机制：HAL 需播完剩余数据 | 使用 flush() 强制清空 |
 | **多次 play/stop 后无声** | Track 进入异常状态 | 检查 `getState()` + 重新 release/create |
 
-### 10.1 调试命令
+### 14.1 调试命令
 
 ```bash
 # 查看当前所有 Track 状态
@@ -349,7 +675,7 @@ adb shell dumpsys media.audio_flinger | grep "cblk"
 
 ---
 
-## 11. 关键参考 (References)
+## 15. 关键参考 (References)
 
 1.  [AOSP AudioTrack.cpp](https://android.googlesource.com/platform/frameworks/av/+/refs/heads/main/media/libaudioclient/AudioTrack.cpp)
 2.  [Android Developer: AudioTrack](https://developer.android.com/reference/android/media/AudioTrack)

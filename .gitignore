@@ -2,3 +2,4 @@ my_file/
 docs/
 .DS_Store
 **/.DS_Store
+.joycode/
