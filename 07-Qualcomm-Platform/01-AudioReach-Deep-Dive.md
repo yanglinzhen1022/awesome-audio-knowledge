@@ -97,7 +97,7 @@ graph TD
 
 ```
 PAL 层核心职责:
-
+  Github地址：https://github.com/AudioReach/audioreach-pal
   文件位置: vendor/qcom/opensource/pal/
   
   1. Stream 管理:
@@ -127,7 +127,7 @@ PAL 层核心职责:
 
 ```
 AGM 层核心职责:
-
+  Github地址：https://github.com/AudioReach/audioreach-graphmgr
   文件位置: vendor/qcom/opensource/agm/
   
   1. Graph 生命周期管理:
@@ -152,7 +152,7 @@ AGM 层核心职责:
 
 ```
 GSL 核心功能:
-
+  Github地址：https://github.com/AudioReach/audioreach-graphservices
   1. ACDB 数据解析:
      ├── 从 acdb.mdb (SQLite) 加载 Graph 拓扑
      ├── 解析 SubGraph → Module → Connection
@@ -267,8 +267,209 @@ Mic → Codec ADC → I2S/SoundWire → ADSP
     <device_pp_enable>true</device_pp_enable>
 </usecase>
 ```
+### 5.3 card-defs.xml 关键字段
+```xml
+<defs>
+<card>
+    <id>100</id> //virtual cardid这个是高通虚拟出来的，实际在ASOC里根本没注册这个card，在userspace层走高通的AGM,GLS传递数据
+    <name>qcm6490virtualsndcard</name>
 
----
+    <pcm-device>
+        <id>100</id>
+        <name>PCM100</name>
+        <pcm_plugin>
+            <so-name>libagm_pcm_plugin.so</so-name> //这个会加载tinyalsa的plugin，高通的AGM库有这个实现，会通过BINDER调用到AGM进程的方法，不走普通的ALSA了
+        </pcm_plugin>
+        <props>
+            <playback>1</playback>  //播放PCM
+            <capture>0</capture>
+        </props>
+    </pcm-device>
+
+    <pcm-device>
+        <id>101</id>
+        <name>PCM101</name>
+        <pcm_plugin>
+            <so-name>libagm_pcm_plugin.so</so-name>
+        </pcm_plugin>
+        <props>
+            <playback>0</playback>
+            <capture>1</capture>  //播放PCM
+        </props>
+    </pcm-device>
+    ...
+</card>
+</defs>
+```
+### 5.4 usecaseKvManager.xml 关键字段
+```xml
+//从这个XML知道高通audioreach把一个完整的Graph分成了streams，streampps，devices，devicepps subgraphs，
+PAL层的payloadbuilder会选择对应的配置，比如选择了流类型DEEPBUFFER，设备为SPEKER，把这信息告诉GSL从ACDB里面retrive
+<defs>
+<graph_key_value_pair_info>
+    <streams>
+        <!-- Low-latency stream -->
+        <stream type="PAL_STREAM_LOW_LATENCY">    //低延迟流，性能要求高
+            <keys_and_values Direction="TX" Instance="1">
+                <!-- STREAMTX - RAW_RECORD -->
+                <graph_kv key="0xB1000000" value="0xB1000009"/>
+            </keys_and_values>
+            <keys_and_values Direction="RX" Instance="1">
+                <!-- STREAMRX - PCM_LL_PLAYBACK -->
+                <graph_kv key="0xA1000000" value="0xA100000E"/>
+                <!-- INSTANCE - INSTANCE_1 -->
+                <graph_kv key="0xAB000000" value="0x1"/>
+            </keys_and_values>
+            <keys_and_values Direction="RX" Instance="2">
+                <!-- STREAMRX - PCM_LL_PLAYBACK -->
+                <graph_kv key="0xA1000000" value="0xA100000E"/>
+                <!-- INSTANCE - INSTANCE_2 -->
+                <graph_kv key="0xAB000000" value="0x2"/>
+            </keys_and_values>
+        </stream>
+        <!-- Deep Buffer stream -->
+        <stream type="PAL_STREAM_DEEP_BUFFER">    //高延迟流，稳定
+            <keys_and_values Direction="RX" Instance="1">
+                <!-- STREAMRX - PCM_DEEP_BUFFER -->
+                <graph_kv key="0xA1000000" value="0xA1000001"/>
+                <!-- INSTANCE - INSTANCE_1 -->
+                <graph_kv key="0xAB000000" value="0x1"/>
+            </keys_and_values>
+            <keys_and_values Direction="RX" Instance="2">
+                <!-- STREAMRX - PCM_DEEP_BUFFER -->
+                <graph_kv key="0xA1000000" value="0xA1000001"/>
+                <!-- INSTANCE - INSTANCE_2 -->
+                <graph_kv key="0xAB000000" value="0x2"/>
+            </keys_and_values>
+            <keys_and_values Direction="TX" Instance="1">
+                <!-- STREAMTX - PCM_RECORD -->
+                <graph_kv key="0xB1000000" value="0xB1000001"/>
+                <!-- INSTANCE - INSTANCE_1 -->
+                <graph_kv key="0xAB000000" value="0x1"/>
+            </keys_and_values>
+            <keys_and_values Direction="TX" Instance="2">
+                <!-- STREAMTX - PCM_RECORD -->
+                <graph_kv key="0xB1000000" value="0xB1000001"/>
+                <!-- INSTANCE - INSTANCE_2 -->
+                <graph_kv key="0xAB000000" value="0x2"/>
+            </keys_and_values>
+            <keys_and_values Direction="TX" Instance="3">
+                <!-- STREAMTX - PCM_RECORD -->
+                <graph_kv key="0xB1000000" value="0xB1000001"/>
+                <!-- INSTANCE - INSTANCE_3 -->
+                <graph_kv key="0xAB000000" value="0x3"/>
+            </keys_and_values>
+        </stream>
+        ...
+    </streams>
+
+    <streampps>
+        <!-- Voice Call stream PP -->
+        <streampp type="PAL_STREAM_VOICE_CALL">
+            <keys_and_values>
+                <!-- STREAMPP_RX - STREAMPP_RX_DEFAULT -->
+                <graph_kv key="0xAF000000" value="0xAF000001"/>
+            </keys_and_values>
+        </streampp>
+    </streampps>
+
+    <devices>
+        <!-- Speaker Device -->
+        <device id="PAL_DEVICE_OUT_SPEAKER">  //自带SPEAKER
+            <keys_and_values>
+                <!-- DEVICERX - SPEAKER -->
+                <graph_kv key="0xA2000000" value="0xA2000001"/>
+            </keys_and_values>
+        </device>
+        <!-- Handset Device -->
+        <device id="PAL_DEVICE_OUT_HANDSET">
+            <keys_and_values>
+                <!-- DEVICERX - HANDSET -->
+                <graph_kv key="0xA2000000" value="0xA2000004"/>
+            </keys_and_values>
+        </device>
+        ...
+    </devices>
+
+    <devicepps>
+    <!-- OUT Speaker DevicePPs -->
+        <!-- OUT Speaker DevicePPs -->
+        <devicepp id="PAL_DEVICE_OUT_SPEAKER">  //SPEAKER设备下不同的流类型处理不同，一般音效都在这个subgraph里
+            <keys_and_values StreamType="PAL_STREAM_DEEP_BUFFER,PAL_STREAM_PCM_OFFLOAD,PAL_STREAM_COMPRESSED,PAL_STREAM_LOW_LATENCY,PAL_STREAM_GENERIC">
+                <!-- DEVICERX - SPEAKER -->
+                <graph_kv key="0xA2000000" value="0xA2000001"/>
+                <!-- DEVICEPP_RX - DEVICEPP_RX_AUDIO_MBDRC -->
+                <graph_kv key="0xAC000000" value="0xAC000002"/>
+            </keys_and_values>
+            <keys_and_values StreamType="PAL_STREAM_LOW_LATENCY" CustomConfig="speaker-safe">
+                <!-- DEVICERX - SPEAKER -->
+                <graph_kv key="0xA2000000" value="0xA2000001"/>
+                <!-- DEVICEPP_RX - DEVICEPP_RX_AUDIO_MBDRC -->
+                <graph_kv key="0xAC000000" value="0xAC000002"/>
+            </keys_and_values>
+        </devicepp>
+
+        <!-- OUT Handset DevicePPs -->
+        <devicepp id="PAL_DEVICE_OUT_HANDSET">
+            <keys_and_values StreamType="PAL_STREAM_DEEP_BUFFER,PAL_STREAM_PCM_OFFLOAD,PAL_STREAM_COMPRESSED,PAL_STREAM_LOW_LATENCY,PAL_STREAM_GENERIC">
+                <!-- DEVICERX - HANDSET -->
+                <graph_kv key="0xA2000000" value="0xA2000004"/>
+                <!-- DEVICEPP_RX - DEVICEPP_RX_AUDIO_MBDRC -->
+                <graph_kv key="0xAC000000" value="0xAC000002"/>
+            </keys_and_values>
+            <keys_and_values StreamType="PAL_STREAM_VOIP_RX">
+                <!-- DEVICERX - HANDSET -->
+                <graph_kv key="0xA2000000" value="0xA2000004"/>
+                <!-- DEVICEPP_RX - DEVICEPP_RX_VOIP_MBDRC -->
+                <graph_kv key="0xAC000000" value="0xAC000003"/>
+            </keys_and_values>
+        </devicepp>
+    </devicepps>
+</graph_key_value_pair_info>
+```
+
+### 5.5 mixer_paths.xml
+```xml
+//主要是用来控制codec的mixer ctl
+<mixer>
+    <!-- These are the initial mixer settings -->
+    <ctl name="WSA_AIF_VI Mixer WSA_SPKR_VI_1" value="0" />
+    <ctl name="WSA_AIF_VI Mixer WSA_SPKR_VI_2" value="0" />
+    <ctl name="WSA_AIF_CPS Mixer WSA_SPKR_CPS_1" value="0" />
+    <ctl name="WSA_AIF_CPS Mixer WSA_SPKR_CPS_2" value="0" />
+
+    <!-- Codec controls -->
+    <!-- WSA controls -->
+    <ctl name="WSA RX0 MUX" value="ZERO" />
+    <ctl name="WSA RX1 MUX" value="ZERO" />
+    <ctl name="WSA_RX0 INP0" value="ZERO" />
+    <ctl name="WSA_RX1 INP0" value="ZERO" />
+    <ctl name="WSA2 RX0 MUX" value="ZERO" />
+    <ctl name="WSA2 RX1 MUX" value="ZERO" />
+    <ctl name="WSA2_RX0 INP0" value="ZERO" />
+    <ctl name="WSA2_RX1 INP0" value="ZERO" />
+    <path name="speaker">
+        <ctl name="SpkrLeft PA Volume" value="20" />
+        <ctl name="WSA RX0 MUX" value="AIF1_PB" />
+        <ctl name="WSA_RX0 INP0" value="RX0" />
+        <ctl name="WSA_COMP1 Switch" value="1" />
+        <ctl name="SpkrLeft COMP Switch" value="1" />
+        <ctl name="SpkrLeft BOOST Switch" value="1" />
+        <ctl name="SpkrLeft DAC Switch" value="1" />
+        <ctl name="SpkrLeft VISENSE Switch" value="1" />
+	      <ctl name="SpkrRight PA Volume" value="20" />
+        <ctl name="WSA RX1 MUX" value="AIF1_PB" />
+        <ctl name="WSA_RX1 INP0" value="RX1" />
+        <ctl name="WSA_COMP2 Switch" value="1" />
+        <ctl name="SpkrRight COMP Switch" value="1" />
+        <ctl name="SpkrRight BOOST Switch" value="1" />
+        <ctl name="SpkrRight DAC Switch" value="1" />
+        <ctl name="SpkrRight VISENSE Switch" value="1" />
+    </path>
+    <ctl name="Spkr2Right WSA MODE" value="0" />
+    ...
+</mixer> 
+```
 
 ## 6. Graph 生命周期
 
