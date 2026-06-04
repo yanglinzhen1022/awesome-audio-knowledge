@@ -106,18 +106,6 @@
 | **Band-pass (带通)** | 只保留某段频率 | 突出人声 | Fc, Q | 只取中间一段 |
 | **Notch (陷波)** | 精确"挖掉"一个频率点 | 去 50/60Hz 工频干扰 | Fc, Q | 精准挑出沙粒 |
 
-```
-各类滤波器的频率响应形状:
-
-  HPF          LPF          Peaking       Low-shelf     High-shelf     Notch
-  (高通)       (低通)        (钟形)        (低架+Gain)   (高架+Gain)    (陷波)
-
-  |  ___       ___  |         /\          ________       ________
-  | /            \  |        /  \        /               \
-  |/              \ |       /    \      /                 \       \  /
-  ─────           ─────    ────────    ───                ───      \/
-  Fc              Fc         Fc        Fc                 Fc       Fc
-```
 
 ### 1.4 Biquad 滤波器——EQ 的核心构建块
 
@@ -273,8 +261,8 @@ Ratio ∞:1 的含义:
 ```
                     Output (dB)
                       │
-            1:1 线    │     /
-             (不压缩) │    / ← Ratio 2:1 (压缩)
+            1:1 line  │     /
+                      │    / ← Ratio 2:1 (压缩)
                       │   /
                       │  /←── Ratio ∞:1 (限制器)
                       │ /
@@ -343,11 +331,11 @@ float drc_process(drc_state_t *s, float input_sample) {
 
 ```
 正常信号:            削波后 (失真):
-    /\                  ___
+    /\                 ___
    /  \               /   \
   /    \             /     \
  /      \           /       \
-         \___             \___
+         \___                \___
 
 当信号超过数字系统的最大值 (0dBFS) 时，
 超出部分被"削掉"，波形变成方波 → 产生刺耳的失真。
@@ -422,11 +410,11 @@ Limiter 就是在信号到达 0dBFS 之前把它压下来。
 ```
 声音传播时间线:
 
-  0ms        5-50ms         50-500ms           500ms+
-   │           │               │                 │
-   ▼     ▼               ▼                 ▼
-  直达声    早期反射声      后期混响          混响尾
-  (Direct)  (Early Refl.)  (Late Reverb)     (Tail)
+  0ms         5-50ms        50-500ms         500ms+
+   │            │              │               │
+   ▼            ▼              ▼               ▼
+  直达声      早期反射声       后期混响          混响尾
+  (Direct) (Early Refl.)  (Late Reverb)     (Tail)
   
   ← 距离感 → ← 房间大小 → ← 空间感/氛围 →
 
@@ -740,8 +728,8 @@ AudioServer 进程内 vs HAL/DSP 侧处理:
   │ MixerThread│     │ MixerThread│
   │ + Effect  │     │ (无 Effect)│
   │ (CPU 处理)│     └──────┬─────┘
-  └──────┬─────┘           │
-         │                  ▼
+  └──────┬─────┘          │
+         │                ▼
          ▼           ┌──────────┐
   ┌──────────┐       │ Audio HAL│
   │ Audio HAL│       │ → DSP   │
