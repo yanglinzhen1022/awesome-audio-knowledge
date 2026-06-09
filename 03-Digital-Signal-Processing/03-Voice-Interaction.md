@@ -201,6 +201,202 @@ graph LR
     首字延迟 < 300ms
 ```
 
+### 4.5 Conformer 编码器架构详解
+
+**Conformer (Convolution-augmented Transformer)** 是当前 ASR 编码器的事实标准，由 Google (2020) 提出。核心创新：在 Transformer 的自注意力层中嵌入卷积模块，同时捕捉全局依赖和局部特征。
+
+```
+Conformer Block 结构 (Macaron-Net 风格):
+
+  Input (T×D)
+    │
+    ▼
+  ┌─────────────────────────────────┐
+  │  1. Feed-Forward Module (½)      │  ← 半步残差 (0.5× 缩放)
+  │     LayerNorm → Linear → Swish → Dropout → Linear → Dropout
+  └───────────────────┬─────────────┘
+    │ + 0.5×residual  │
+    ▼                 │
+  ┌─────────────────────────────────┐
+  │  2. Multi-Head Self-Attention    │  ← 全局序列建模
+  │     LayerNorm → RelPosAttn(H heads) → Dropout
+  └───────────────────┬─────────────┘
+    │ + residual      │
+    ▼                 │
+  ┌─────────────────────────────────┐
+  │  3. Convolution Module           │  ← 局部特征提取
+  │     LayerNorm → PointwiseConv → GLU → DepthwiseConv(k=31)
+  │     → BatchNorm → Swish → PointwiseConv → Dropout
+  └───────────────────┬─────────────┘
+  │ + residual        │
+  ▼                   │
+  ┌─────────────────────────────────┐
+  │  4. Feed-Forward Module (½)      │  ← 半步残差
+  └───────────────────┬─────────────┘
+    │ + 0.5×residual  │
+    ▼
+  LayerNorm → Output (T×D)
+
+关键设计:
+  - 相对位置编码 (Relative Positional Encoding): 
+    比绝对位置更适合流式 (位移不变性)
+  - Depthwise Separable Conv (核大小 k=15~31):
+    捕捉帧级局部模式 (如协同发音)
+  - Macaron 结构: 两个半步 FFN 夹住 Attention+Conv
+    实验证明比单个 FFN 效果更好
+  - 典型超参: D=256/512, H=4/8, layers=12/16
+```
+
+### 4.6 解码策略：CTC vs Attention vs RNN-T
+
+| 解码方式 | 全称 | 原理 | 延迟 | 精度 | 适用 |
+|:---|:---|:---|:---|:---|:---|
+| **CTC** | Connectionist Temporal Classification | 帧级独立分类 + blank 对齐 | 低 (逐帧) | 中 | 流式首选 |
+| **AED** | Attention-based Encoder-Decoder | 自回归 + 交叉注意力 | 高 (需全句) | 高 | 离线/非流式 |
+| **CTC/AED Joint** | — | CTC 辅助训练 + AED 解码 | 中 | 高 | WeNet U2 |
+| **RNN-T** | RNN-Transducer | Encoder + Prediction + Joint | 低 (逐帧) | 高 | 端侧主流 |
+
+#### 4.6.1 CTC 解码
+
+```
+CTC (Connectionist Temporal Classification):
+
+  原理:
+    - 每帧独立预测 token (包含 blank ⟨ε⟩ 符号)
+    - 输出序列通过"折叠"规则去重:
+      例: a_ε_ε_b_b_ε_c → abc
+    
+  损失函数:
+    L_CTC = -log P(Y|X) = -log Σ_{π∈Align(Y)} Π_t P(π_t|X)
+    → 用 Forward-Backward 动态规划高效计算
+    
+  解码方法:
+    1. Greedy: 每帧取 argmax → 快但精度低
+    2. Prefix Beam Search: 维护前缀概率 → 精度高
+    3. CTC + LM Fusion: 加入外部语言模型重打分
+    
+  CTC 局限:
+    - 条件独立假设: 各帧输出独立 → 无法建模输出间依赖
+    - 输出结果可能语法不通顺 (需 LM 补偿)
+    
+  CTC 优势:
+    - 天然流式 (输入多少帧输出多少帧)
+    - 单调对齐 → 无需注意力机制
+    - 训练收敛快
+```
+
+#### 4.6.2 RNN-Transducer (RNN-T)
+
+```
+RNN-T 架构:
+
+  Audio frames → [Encoder (Conformer)] → h_enc(t)  ← 声学表示
+                                              ↓
+  Previous tokens → [Prediction Network (LSTM)] → h_pred(u) ← 语言表示
+                                              ↓
+                                    [Joint Network]
+                                    joint(t,u) = Tanh(Linear(h_enc(t) + h_pred(u)))
+                                              ↓
+                                    Softmax → P(y|t,u)
+                                              ↓
+                                    输出: token 或 blank(ε)
+
+  解码过程 (逐帧):
+    for each encoder frame t:
+      while output != blank:
+        predict next token
+        update prediction network state
+      advance to next frame (t++)
+      
+  RNN-T 优势:
+    - 同时建模声学和语言信息
+    - 天然流式 (encoder 逐帧处理)
+    - 输出质量优于 CTC (有 prediction network 建模输出依赖)
+    
+  RNN-T 训练:
+    - Transducer Loss: 类似 CTC 的前向-后向算法
+    - 计算量大: O(T×U) lattice (T=输入帧数, U=输出长度)
+    - 工具: warp-transducer / torchaudio / k2
+
+  端侧部署:
+    - Encoder: Conformer 量化 (INT8)
+    - Prediction Network: 小 LSTM (2层, 256维)
+    - Joint Network: Linear + Tanh + Linear
+    - 整体 ~30-50MB (INT8 量化后)
+```
+
+### 4.7 中文 ASR 特殊处理
+
+```
+中文 ASR 与英文的关键差异:
+
+  1. 建模单元选择:
+     - 英文: BPE (Byte Pair Encoding) / WordPiece (~4K-8K tokens)
+     - 中文: 字 (Character, ~5K 常用汉字) 或 BPE (~8K-16K)
+     - 混合: 中英混合场景用 BPE (支持中英文 code-switching)
+     
+  2. 无分词问题:
+     - 中文无天然词边界 → 用字级建模避免分词错误
+     - 词级模型需要词典 + 分词器 (容易引入 OOV)
+     
+  3. 多音字 (Polyphone):
+     - "行": háng (行业) / xíng (行走)
+     - "乐": lè (快乐) / yuè (音乐)
+     - 解决: 上下文建模 (Transformer 天然擅长)
+     
+  4. 声调 (Tone):
+     - 普通话4声+轻声
+     - 声调主要体现在基频 (F0) 变化
+     - 现代 E2E 模型隐式学习声调无需显式建模
+     
+  5. 方言与口音:
+     - 粤语、闽南语、四川话等差异巨大
+     - 多方言 ASR:多任务训练 / 方言 ID + 适应
+     
+  6. 热词 (Hotword) 定制:
+     - 人名、地名、专有名词识别率低
+     - 方案: CTC prefix + hotword boosting
+     - 高通/讯飞: 运行时注入热词列表 (偏置解码)
+```
+
+### 4.8 LLM (Large Language Model) 时代的语音交互
+
+```
+GPT-4o / Gemini 等多模态大模型对语音交互的变革:
+
+传统 Pipeline:
+  Audio → ASR → Text → NLU → Action → TTS → Audio
+  (多级级联, 每级引入延迟和错误累积)
+
+LLM-Native 语音:
+  Audio → [Speech LLM (端到端)] → Audio/Text/Action
+  (直接建模语音到语义的映射)
+
+代表方案:
+  ┌────────────────────────────────────────────────────┐
+  │ GPT-4o (OpenAI):                                    │
+  │   - 原生多模态 (audio/text/image 统一 token 空间)  │
+  │   - 端到端延迟 ~250ms (vs pipeline ~1-2s)          │
+  │   - 支持实时打断、情感表达                          │
+  │   - 不公开架构细节                                  │
+  ├────────────────────────────────────────────────────┤
+  │ Whisper + GPT-4 (级联方案):                         │
+  │   Audio → Whisper ASR → Text → GPT-4 → Text → TTS │
+  │   端到端延迟 ~2-4s                                  │
+  ├────────────────────────────────────────────────────┤
+  │ 端侧语音 Agent (趋势):                             │
+  │   - Qualcomm: on-device LLM (7B) + ASR + TTS       │
+  │   - Apple: Siri + Apple Intelligence 端侧推理      │
+  │   - 挑战: 7B 模型 + 语音前端 → 内存/功耗/延迟     │
+  └────────────────────────────────────────────────────┘
+
+对音频工程师的影响:
+  - 前端 3A/BF 依然不可或缺 (LLM 不解决物理层面问题)
+  - 低延迟音频通路更加重要 (LLM 已经很快, 不能让音频拖后腿)
+  - 流式推理: 需要 chunk-based audio streaming 给 LLM
+  - 端侧部署: NPU/DSP 协同 (前端 DSP + LLM on NPU)
+```
+
 ---
 
 ## 5. 自然语言理解 (NLU)
