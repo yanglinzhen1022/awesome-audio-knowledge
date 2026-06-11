@@ -60,53 +60,310 @@ static jint android_media_AudioTrack_setup(JNIEnv *env, jobject thiz, ...) {
 
 ### 3.1 核心调用栈源码级解析 (Call Stack)
 
-1.  **`AudioTrack::set(...)`**：
-    *   **职责**：校验参数（采样率、格式等），计算 `frameCount`。
-    ```cpp
-    status_t AudioTrack::set(audio_stream_type_t streamType, uint32_t sampleRate, ...) {
-        // 校验采样率与格式
-        if (!audio_is_valid_format(format)) return BAD_VALUE;
-        // 计算每一帧的大小 (channels * bytes_per_sample)
-        mFrameSize = audio_bytes_per_sample(format) * channelCount;
-        // 随后进入关键的创建流程
-        return createTrack_l();
-    }
-    ```
+```
+完整调用链概览:
 
-2.  **`AudioTrack::createTrack_l(...)`**：
-    *   **策略查询**：调用 `AudioSystem::getOutputForAttr`。此步骤会向 `AudioPolicyManager` 请求一个 `audio_io_handle_t`（输出句柄）。
-    ```cpp
-    status_t AudioTrack::createTrack_l() {
-        // 🚀 灵魂步骤：询问 Policy 大脑，我该去哪个输出线程？
-        status = AudioSystem::getOutputForAttr(&mAttributes, &output, mSessionId, ...);
-        
-        // 拿到 output 句柄后，发起跨进程 Binder 调用
-        sp<IAudioTrack> track = audioFlinger->createTrack(input, output, &status);
-    }
-    ```
+App: new AudioTrack()
+ └→ AudioTrack::set()                         [libaudioclient, Client 进程]
+     ├→ audio_is_valid_format() / 参数校验
+     ├→ mFrameSize = channels × bytesPerSample
+     └→ createTrack_l()                        [核心创建逻辑]
+         ├→ AudioSystem::getOutputForAttr()    [Binder → AudioPolicyService]
+         │    └→ AudioPolicyManager::getOutputForAttr()
+         │         ├→ getStrategyForAttr()     [AudioAttributes → Strategy]
+         │         ├→ getDevicesForStrategy()  [Strategy → 输出设备]
+         │         └→ getOutputForDevices()    [设备 → output 句柄]
+         │              └→ 匹配 flags/format/samplingRate 选择最佳 output
+         │
+         ├→ AudioFlinger::createTrack()        [Binder IPC → audioserver]
+         │    ├→ checkPlaybackThread_l(output)  [output → PlaybackThread]
+         │    ├→ PlaybackThread::createTrack_l()
+         │    │    ├→ FastTrack 准入检查
+         │    │    ├→ new Track(thread, client, streamType, ...)
+         │    │    │    ├→ TrackBase::TrackBase()
+         │    │    │    │    ├→ 分配 ashmem (共享内存)
+         │    │    │    │    ├→ 初始化 audio_track_cblk_t (控制块)
+         │    │    │    │    └→ mmap 映射到 Client 地址空间
+         │    │    │    └→ 初始化 AudioTrackServerProxy
+         │    │    └→ 加入 mTracks 列表 (非活跃)
+         │    └→ return TrackHandle (Binder 代理)
+         │
+         └→ 初始化 Client 侧代理
+              ├→ mCblk = track->getCblk()       [获取控制块指针]
+              ├→ mBuffers = track->getBuffers()  [获取数据区指针]
+              └→ new AudioTrackClientProxy(mCblk, mBuffers, frameCount)
+```
 
-3.  **`AudioFlinger::createTrack(...)`** (Server 侧执行)：
-    *   **分配资源**：在对应的 `PlaybackThread` 中创建 `Track` 对象并分配匿名共享内存。
-    ```cpp
-    sp<IAudioTrack> AudioFlinger::createTrack(...) {
-        // 找到对应的线程 (MixerThread / DirectThread)
-        PlaybackThread *thread = checkPlaybackThread_l(output);
-        // 创建 Track 实例，内部会分配 ashmem
-        track = thread->createTrack_l(client, streamType, ...);
-        // 返回 Binder 接口给 Client
-        return new TrackHandle(track);
-    }
-    ```
+### 3.2 AudioTrack::set() — 参数校验与配置
 
-### 3.2 建立同步机制 (Proxy Setup)
-一旦 Binder 调用返回，Client 侧会执行：
 ```cpp
-// AudioTrack.cpp 内部逻辑
-mAudioTrackShared = track->getCblk(); // 获取控制块
-mDataMemory = track->getBuffers();    // 获取数据区
+// frameworks/av/media/libaudioclient/AudioTrack.cpp
+status_t AudioTrack::set(audio_stream_type_t streamType, uint32_t sampleRate,
+                         audio_format_t format, audio_channel_mask_t channelMask,
+                         size_t frameCount, audio_output_flags_t flags, ...) {
+    // 1. 格式校验
+    if (!audio_is_valid_format(format)) return BAD_VALUE;
+    if (!audio_is_output_channel(channelMask)) return BAD_VALUE;
+    
+    // 2. 计算帧大小
+    uint32_t channelCount = audio_channel_count_from_out_mask(channelMask);
+    mFrameSize = audio_bytes_per_sample(format) * channelCount;
+    // 例: PCM_16BIT + STEREO → 2 × 2 = 4 bytes/frame
+    
+    // 3. 采样率处理
+    if (sampleRate == 0) {
+        sampleRate = DEFAULT_SAMPLE_RATE;  // 通常 44100 或 48000
+    }
+    mSampleRate = sampleRate;
+    
+    // 4. frameCount 处理 (0 表示让系统决定)
+    if (frameCount == 0) {
+        // 从 AudioPolicyManager 查询该 output 的建议 buffer size
+        frameCount = calculateMinFrameCount(afLatencyMs, afFrameCount, afSampleRate, 
+                                             sampleRate, speed);
+    }
+    
+    // 5. 保存 flags (决定走哪个 Thread)
+    mFlags = flags;
+    
+    // 6. 进入核心创建流程
+    return createTrack_l();
+}
+```
 
-// 🚀 初始化代理类
-mProxy = new AudioTrackClientProxy(mAudioTrackShared, mDataMemory, ...);
+### 3.3 AudioSystem::getOutputForAttr() — Policy 路由决策
+
+```cpp
+// frameworks/av/media/libaudioclient/AudioSystem.cpp
+// 这是一个跨进程 Binder 调用, 最终到达 AudioPolicyService
+
+// AudioPolicyManager 侧的处理:
+// frameworks/av/services/audiopolicy/managerdefault/AudioPolicyManager.cpp
+status_t AudioPolicyManager::getOutputForAttr(const audio_attributes_t *attr,
+                                               audio_io_handle_t *output,
+                                               audio_session_t session,
+                                               audio_output_flags_t *flags, ...) {
+    // 1. AudioAttributes → ProductStrategy
+    //    USAGE_MEDIA + CONTENT_TYPE_MUSIC → STRATEGY_MEDIA
+    product_strategy_t strategy = mEngine->getProductStrategyForAttributes(*attr);
+    
+    // 2. Strategy → 输出设备
+    //    STRATEGY_MEDIA → 当前最高优先级设备 (A2DP > USB > Headset > Speaker)
+    DeviceVector devices = mEngine->getOutputDevicesForAttributes(*attr);
+    
+    // 3. 设备 + flags → 选择最佳 output (对应 PlaybackThread)
+    *output = getOutputForDevices(devices, session, stream, attr, flags, ...);
+    
+    // 内部逻辑: 遍历已打开的 outputs, 匹配:
+    //   - flags 兼容 (DEEP_BUFFER/FAST/DIRECT 等)
+    //   - 采样率/格式 兼容
+    //   - 设备匹配
+    //   如果没有匹配的 → 可能新开一个 output (openOutput)
+    
+    return NO_ERROR;
+}
+```
+
+**output 句柄 (audio_io_handle_t) 的本质：**
+```
+audio_io_handle_t 是一个整数 ID, 对应 AudioFlinger 中的一个 PlaybackThread。
+每个 PlaybackThread 绑定一个 HAL 输出流 (StreamOut):
+
+  output=1 → MixerThread (primary_output, Speaker, deep_buffer)
+  output=2 → MixerThread (primary_output, Speaker, low_latency)  
+  output=3 → DirectOutputThread (Hi-Res USB DAC, 192kHz/24bit)
+  output=4 → OffloadThread (compress_offload, DSP 硬解)
+  output=5 → MmapThread (AAudio exclusive mode)
+
+同一物理设备可能有多个 output (不同 flags 对应不同 buffer 策略)
+```
+
+### 3.4 AudioFlinger::createTrack() — 资源分配
+
+```cpp
+// frameworks/av/services/audioflinger/AudioFlinger.cpp
+sp<IAudioTrack> AudioFlinger::createTrack(const CreateTrackInput& input,
+                                           CreateTrackOutput& output,
+                                           status_t *status) {
+    // 1. 查找目标 PlaybackThread
+    PlaybackThread *thread = checkPlaybackThread_l(input.output);
+    if (thread == nullptr) {
+        *status = BAD_VALUE;  // output 不存在
+        return nullptr;
+    }
+    
+    // 2. 在 Thread 中创建 Track
+    sp<PlaybackThread::Track> track;
+    track = thread->createTrack_l(client, input.attr, &output.sampleRate,
+                                   input.format, input.channelMask,
+                                   &output.frameCount, &output.notificationFrameCount,
+                                   input.flags, ...);
+    
+    // 3. 填充输出参数 (告诉 Client 实际分配了什么)
+    output.outputId = thread->id();
+    output.afLatencyMs = thread->latency();
+    output.afFrameCount = thread->frameCount();
+    output.afSampleRate = thread->sampleRate();
+    
+    // 4. 返回 Binder 接口 (TrackHandle 包装 Track)
+    trackHandle = new TrackHandle(track);
+    return trackHandle;
+}
+```
+
+### 3.5 共享内存分配与 cblk 初始化
+
+```cpp
+// frameworks/av/services/audioflinger/TrackBase.cpp
+AudioFlinger::TrackBase::TrackBase(..., size_t bufferSize) {
+    size_t size = sizeof(audio_track_cblk_t);  // 控制块 (~64 bytes)
+    size_t bufferOffset = size;                  // 数据区紧跟控制块之后
+    size += bufferSize;                          // 总共享内存 = cblk + data buffer
+    
+    // 1. 分配匿名共享内存 (ashmem)
+    mCblkMemory = client->allocator().allocate(size);
+    // allocator 内部: ashmem_create_region("AudioTrack", size)
+    //   → /dev/ashmem 创建匿名共享内存区域
+    //   → mmap 映射到当前进程 (audioserver)
+    
+    // 2. 获取 cblk 指针 (共享内存起始位置)
+    void *iMem = mCblkMemory->unsecurePointer();
+    mCblk = static_cast<audio_track_cblk_t*>(iMem);
+    
+    // 3. placement new 初始化控制块
+    new (mCblk) audio_track_cblk_t();
+    
+    // 4. 数据区指针 (紧跟 cblk 之后)
+    mBuffer = (char*)mCblk + bufferOffset;
+    // 此区域是环形缓冲区的 backing memory
+}
+```
+
+**audio_track_cblk_t 控制块详解：**
+```cpp
+// frameworks/av/media/libaudioclient/include/media/AudioTrackShared.h
+struct audio_track_cblk_t {
+    // --- 原子操作的位置指针 (lock-free 环形 buffer 核心) ---
+    volatile int32_t mServer;    // AF 已消费到的帧位置 (Server 侧更新)
+    volatile int32_t mPosition;  // App 已写入到的帧位置 (Client 侧更新) [已废弃, 用 Proxy]
+    
+    // --- Proxy 机制 (Android 4.4+ 替代直接原子操作) ---
+    // 实际读写指针由 StaticAudioTrackClientProxy / AudioTrackClientProxy 管理:
+    //   mRear: Client 写指针 (App 更新)
+    //   mFront: Server 读指针 (AF 更新)
+    //   available = mRear - mFront (可读帧数)
+    //   space = frameCount - available (可写帧数)
+    
+    int32_t         mMinimum;        // Server 读取的最小帧数
+    volatile int32_t mVolumeLR;      // 音量 (packed left:16 | right:16)
+    uint32_t        mSampleRate;     // 客户端采样率
+    uint32_t        mSendLevel;      // AUX 效果发送量
+    volatile int32_t mFlags;         // CBLK_UNDERRUN, CBLK_FORCEREADY 等标志
+    
+    // padding 对齐到 cache line (避免 false sharing)
+};
+```
+
+### 3.6 重采样决策 (Resampler)
+
+```cpp
+// frameworks/av/services/audioflinger/Threads.cpp
+// PlaybackThread::createTrack_l() 中判断是否需要重采样
+
+bool needsResampling = (sampleRate != thread->sampleRate());
+// 例: App 请求 44100Hz, 但 HAL output 是 48000Hz → 需要重采样
+
+if (needsResampling) {
+    // AudioMixer 为该 Track 配置 Resampler
+    // 使用的算法: 高质量多相滤波 (Polyphase filter)
+    // 源码: frameworks/av/media/libaudioprocessing/AudioResampler.cpp
+    //
+    // 质量等级:
+    //   LOW_QUALITY    — 线性插值 (快但有混叠)
+    //   MED_QUALITY    — 多相 (默认, 平衡)
+    //   HIGH_QUALITY   — 高阶多相 (96dB 阻带抑制)
+    //   VERY_HIGH_QUALITY — 用于 Direct/Offload 路径
+    //
+    // 性能影响:
+    //   44100→48000 重采样约增加 ~2% CPU (ARM NEON 优化)
+    //   如果所有 Track 都是 48kHz → 无需重采样 → 最省 CPU
+}
+
+// FastTrack 不支持重采样 (必须采样率匹配)
+if ((flags & AUDIO_OUTPUT_FLAG_FAST) && needsResampling) {
+    ALOGW("AUDIO_OUTPUT_FLAG_FAST denied: sample rate mismatch");
+    flags &= ~AUDIO_OUTPUT_FLAG_FAST;  // 降级为 NormalTrack
+}
+```
+
+### 3.7 Client 侧代理初始化 (回到 Client 进程)
+
+```cpp
+// AudioTrack::createTrack_l() 后半段 (Binder 返回后)
+status_t AudioTrack::createTrack_l() {
+    // ... getOutputForAttr / createTrack 完成后 ...
+    
+    // 1. 从 TrackHandle 获取共享内存的 fd (通过 Binder 传递)
+    sp<IMemory> iMem = track->getCblk();
+    // 内部: Binder 传递了 ashmem fd → Client 进程 mmap 同一块物理内存
+    
+    // 2. 获取 cblk 和 buffer 指针 (Client 视角)
+    mCblk = static_cast<audio_track_cblk_t*>(iMem->unsecurePointer());
+    mBuffers = track->getBuffers();  // 数据区起始地址
+    
+    // 3. 创建 Client 侧 Proxy
+    if (mSharedBuffer == nullptr) {
+        // MODE_STREAM: 使用环形 buffer proxy
+        mProxy = new AudioTrackClientProxy(mCblk, mBuffers, mFrameCount, mFrameSize);
+    } else {
+        // MODE_STATIC: 使用静态 buffer proxy
+        mProxy = new StaticAudioTrackClientProxy(mCblk, mBuffers, mFrameCount, mFrameSize);
+    }
+    
+    // 4. 配置 proxy 参数
+    mProxy->setSampleRate(mSampleRate);
+    mProxy->setSendLevel(mSendLevel);
+    mProxy->setVolumeLR(gain_minifloat_pack(mVolume[LEFT], mVolume[RIGHT]));
+    
+    // 5. 记录 AF 侧参数 (用于延迟计算)
+    mAfLatency = output.afLatencyMs;
+    mAfFrameCount = output.afFrameCount;
+    mAfSampleRate = output.afSampleRate;
+    
+    return NO_ERROR;
+}
+```
+
+### 3.8 初始化完整时序图
+
+```mermaid
+sequenceDiagram
+    participant App as App Process
+    participant AT as AudioTrack (Client)
+    participant APS as AudioPolicyService
+    participant AF as AudioFlinger
+    participant Thread as PlaybackThread
+    
+    App->>AT: new AudioTrack() / set()
+    AT->>AT: 校验参数, 计算 frameSize/frameCount
+    AT->>APS: getOutputForAttr(attributes, flags)
+    APS->>APS: Strategy→Device→Output 匹配
+    APS-->>AT: output handle (如 output=1)
+    
+    AT->>AF: createTrack(output, format, frameCount, flags)
+    AF->>AF: checkPlaybackThread_l(output)
+    AF->>Thread: createTrack_l(client, params)
+    Thread->>Thread: FastTrack 检查 / 重采样判断
+    Thread->>Thread: new Track() → 分配 ashmem (cblk + buffer)
+    Thread-->>AF: Track 对象
+    AF-->>AT: TrackHandle (Binder proxy) + 共享内存 fd
+    
+    AT->>AT: mmap 共享内存到 Client 地址空间
+    AT->>AT: new AudioTrackClientProxy(cblk, buffers)
+    AT-->>App: AudioTrack 就绪 (STATE_INITIALIZED)
+    
+    Note over App,Thread: 此时 Track 在 mTracks 列表但未激活
+    Note over App,Thread: 调用 play() 后才加入 mActiveTracks
 ```
 
 ---
