@@ -5,13 +5,36 @@
 ## 📖 章节导航
 
 1.  **[Android 音频系统概览 (Overview)](./01-Overview.md)**
-    *   全景架构、进程隔离模型与 AAOS 特殊集成。
+    *   全景架构图：App → Framework → AudioFlinger → HAL → Kernel 五层模型。
+    *   各层级核心组件与职责详解。
+    *   进程隔离模型：App / SystemServer / audioserver / HAL 进程边界与崩溃影响。
+    *   音频流类型与 AudioAttributes 对比。
+    *   数据路径对比：Normal Path / Fast Path / MMAP 延迟与特性。
+    *   关键配置文件速查（audio_policy_configuration.xml 等）。
+    *   版本演进：Android 5.0 ~ 15 音频关键特性时间线。
+    *   AAOS 车载场景扩展概览与调试入口速查。
 2.  **[AudioService 系统管理中心](./02-AudioService.md)**
-    *   Java 层管理总管，负责音量、焦点与设备连接状态。
+    *   AudioService 在系统中的位置与启动流程。
+    *   音量管理体系：StreamVolumeState、音量曲线、安全音量 (CSD)。
+    *   设备管理：AudioDeviceInventory、AudioDeviceBroker、连接/断开事件处理。
+    *   Ringer Mode 与 Do Not Disturb 联动机制。
+    *   媒体按键分发：MediaSession → AudioService → AudioPolicy 链路。
 3.  **[AudioTrack 播放流程解析](./03-AudioTrack.md)**
-    *   Native 初始化调用栈与共享内存同步机制。
+    *   Java API 配置要点：AudioAttributes / AudioFormat / BufferSize / PerformanceMode。
+    *   工作模式对比：MODE_STREAM vs MODE_STATIC 内存策略与适用场景。
+    *   JNI 桥接：Java AudioTrack → Native AudioTrack (libaudioclient) 完整调用链。
+    *   Native 初始化调用栈：`createTrack_l()` → Binder → AudioFlinger `createTrack()`。
+    *   共享内存机制：Ashmem 分配、Control Block 结构、环形缓冲区读写同步。
+    *   数据写入路径：`write()` → obtainBuffer / releaseBuffer → MixerThread 消费。
+    *   Underrun 处理策略与 getMinBufferSize 计算原理。
 4.  **[AudioRecord 录音流程解析](./04-AudioRecord.md)**
-    *   音频源选择与录音数据流向。
+    *   AudioSource 选型指南：MIC / VOICE_COMMUNICATION / UNPROCESSED / VOICE_RECOGNITION 等场景差异。
+    *   AudioSource 与预处理算法绑定：VOICE_COMMUNICATION 自动加载 AEC/NS/AGC 的底层机制。
+    *   JNI 桥接与 Native AudioRecord 初始化调用栈。
+    *   RecordThread 数据流：HAL read() → ResamplerBufferProvider → RecordTrack → SharedMem → App。
+    *   多客户端并发录音：RecordThread 多 RecordTrack 分发、权限控制与优先级抢占。
+    *   权限与隐私：RECORD_AUDIO 权限、前台服务要求 (Android 9+)、录音指示器 (Android 12+)。
+    *   Overrun 诊断与 Buffer 容量调优。
 5.  **[AudioFlinger 混音引擎深度解析](./05-AudioFlinger.md)**
     *   线程模型全景：MixerThread / DirectOutput / OffloadThread / MMAP。
     *   Track 生命周期与状态机（异步状态转换机制）。
@@ -28,11 +51,23 @@
     *   AudioPatch 硬件直连机制。
     *   AAOS 车载特殊策略（Bus 路由、CarAudioFocus）。
 7.  **[Audio HAL 接口规范](./07-AudioHAL.md)**
-    *   从 HIDL 到 AIDL 的演进与 ALSA 驱动对接。
+    *   三代 HAL 接口演进：Legacy C → HIDL → AIDL，传输机制与核心文件对比。
+    *   AIDL HAL 核心接口：IModule / IStreamOut / IStreamIn / IConfig 层次关系。
+    *   FMQ (Fast Message Queue) 数据传输机制与零拷贝设计。
+    *   HAL 实现与 ALSA/TinyALSA 驱动对接：open/write/read 调用流程。
+    *   Audio HAL 调试：VTS 测试、HAL dump、常见兼容性问题。
 8.  **[AudioEffect 音效框架深度解析](./08-AudioEffect.md)**
-    *   音效链加载与 Buffer 传递同步。
+    *   架构分层：App API → EffectsFactory → EffectChain → EffectModule → HAL/DSP。
+    *   音效链挂载点：Session / PerStream / Global，Insert vs Auxiliary 效果类型。
+    *   Buffer 传递与同步：EffectChain 在 MixerThread 中的处理时序。
+    *   AIDL Effect HAL 迁移与 HW Offload 音效。
+    *   自定义音效开发流程与 audio_effects.xml 配置。
 9.  **[AudioFocus 音频焦点机制](./09-AudioFocus.md)**
-    *   基于协作的多应用焦点竞争管理。
+    *   焦点类型：GAIN / GAIN_TRANSIENT / GAIN_TRANSIENT_MAY_DUCK / GAIN_TRANSIENT_EXCLUSIVE。
+    *   MediaFocusControl 仲裁逻辑与 FocusStack 栈管理。
+    *   焦点丢失响应：LOSS / LOSS_TRANSIENT / LOSS_TRANSIENT_CAN_DUCK 处理策略。
+    *   FadeManager (Android 14+) 自动淡入淡出与延迟焦点 (Delayed Focus)。
+    *   AAOS CarAudioFocus 车载定制：交互矩阵与多区域焦点独立管理。
 10. **[Oboe 与 AAudio：低延迟音频 API](./10-Oboe-AAudio.md)**
     *   AAudio MMAP 独占路径与数据回调模型。
     *   Oboe 跨版本兼容方案与自动重连。
