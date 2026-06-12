@@ -57,51 +57,311 @@ status_t AudioRecord::set(...) {
 
 ### 3.1 核心调用栈源码级解析 (Call Stack)
 
-1.  **`AudioRecord::set(...)`**：
-    *   **职责**：校验录音参数，计算 FrameCount。
-    ```cpp
-    status_t AudioRecord::set(audio_source_t inputSource, uint32_t sampleRate, ...) {
-        // 关键：保存 AudioSource，这决定了后续的路由决策
-        mAttributes.source = inputSource;
-        // 随后进入创建逻辑
-        return openRecord_l(0, "");
-    }
-    ```
+```
+完整调用链概览:
 
-2.  **`AudioRecord::openRecord_l(...)`**：
-    *   **策略查询**：调用 `AudioSystem::getInputForAttr`。
-    ```cpp
-    status_t AudioRecord::openRecord_l(...) {
-        // 🚀 灵魂步骤：询问 Policy，我想录 VOICE_COMMUNICATION，该用哪个 Mic？
-        status = AudioSystem::getInputForAttr(&mAttributes, &input, mSessionId, ...);
-        
-        // 拿到 input 句柄后，请求 AudioFlinger 开启录音流
-        sp<IAudioRecord> record = audioFlinger->openRecord(input, ...);
-    }
-    ```
+App: new AudioRecord()
+ └→ AudioRecord::set()                         [libaudioclient, Client 进程]
+     ├→ audio_is_valid_format() / 参数校验
+     ├→ mFrameSize = channels × bytesPerSample
+     └→ openRecord_l()                          [核心创建逻辑]
+         ├→ AudioSystem::getInputForAttr()      [Binder → AudioPolicyService]
+         │    └→ AudioPolicyManager::getInputForAttr()
+         │         ├→ getDeviceForInputSource()  [AudioSource → 输入设备]
+         │         ├→ getInputForDevice()        [设备 → input 句柄]
+         │         │    └→ 匹配 source/format/samplingRate 选择最佳 input
+         │         └→ addAudioPatch() (建立输入设备→MixPort连接)
+         │
+         ├→ AudioFlinger::openRecord()          [Binder IPC → audioserver]
+         │    ├→ checkRecordThread_l(input)      [input → RecordThread]
+         │    ├→ RecordThread::createRecordTrack_l()
+         │    │    ├→ new RecordTrack(thread, client, ...)
+         │    │    │    ├→ TrackBase::TrackBase()
+         │    │    │    │    ├→ 分配 ashmem (共享内存)
+         │    │    │    │    ├→ 初始化 audio_track_cblk_t (控制块)
+         │    │    │    │    └→ mmap 映射到 Client 地址空间
+         │    │    │    └→ 初始化 AudioRecordServerProxy
+         │    │    └→ 前处理 Effect 检查 (AEC/NS/AGC)
+         │    └→ return RecordHandle (Binder 代理)
+         │
+         └→ 初始化 Client 侧代理
+              ├→ mCblk = record->getCblk()       [获取控制块指针]
+              ├→ mBuffers = record->getBuffers()  [获取数据区指针]
+              └→ new AudioRecordClientProxy(mCblk, mBuffers, frameCount)
+```
 
-3.  **`AudioFlinger::openRecord(...)`** (Server 侧执行)：
-    *   **职责**：在 `RecordThread` 中创建 `RecordTrack` 并分配共享内存。
-    ```cpp
-    sp<IAudioRecord> AudioFlinger::openRecord(...) {
-        // 找到对应的录音线程
-        RecordThread *thread = checkRecordThread_l(input);
-        // 创建 RecordTrack，这是数据的生产者
-        recordTrack = thread->createRecordTrack_l(client, ...);
-        // 返回 Binder 句柄
-        return new RecordHandle(recordTrack);
-    }
-    ```
+### 3.2 AudioRecord::set() — 参数校验与配置
 
-### 3.2 共享内存同步 (Record Proxy)
-一旦录音流建立，Native 层会初始化同步代理：
 ```cpp
-// AudioRecord.cpp 内部逻辑
-mAudioRecordShared = record->getCblk();
-mDataMemory = record->getBuffers();
+// frameworks/av/media/libaudioclient/AudioRecord.cpp
+status_t AudioRecord::set(audio_source_t inputSource, uint32_t sampleRate,
+                         audio_format_t format, audio_channel_mask_t channelMask,
+                         size_t frameCount, callback_t cbf, ...) {
+    // 1. 格式校验
+    if (!audio_is_valid_format(format)) return BAD_VALUE;
+    if (!audio_is_input_channel(channelMask)) return BAD_VALUE;
+    
+    // 2. 保存 AudioSource — 决定后续的路由和前处理策略
+    mAttributes.source = inputSource;
+    // VOICE_COMMUNICATION → 后续会加载 AEC/NS/AGC
+    // UNPROCESSED → 不加载任何前处理
+    
+    // 3. 计算帧大小
+    uint32_t channelCount = audio_channel_count_from_in_mask(channelMask);
+    mFrameSize = audio_bytes_per_sample(format) * channelCount;
+    // 例: PCM_16BIT + MONO → 2 × 1 = 2 bytes/frame
+    
+    // 4. 采样率处理
+    if (sampleRate == 0) {
+        sampleRate = DEFAULT_SAMPLE_RATE;  // 通常 44100 或 48000
+    }
+    mSampleRate = sampleRate;
+    
+    // 5. frameCount 处理 (0 表示让系统决定)
+    //    与 AudioTrack 不同, 录音侧由 HAL 的 period 和采样率比决定
+    
+    // 6. Callback 模式设置
+    if (cbf != nullptr) {
+        mCbf = cbf;
+        // 会创建内部 AudioRecordThread 用于回调
+    }
+    
+    // 7. 进入核心创建流程
+    return openRecord_l(0 /*epoch position*/, opPackageName);
+}
+```
 
-// 🚀 初始化录音代理类 (Server 为 Producer, Client 为 Consumer)
-mProxy = new AudioRecordClientProxy(mAudioRecordShared, mDataMemory, ...);
+### 3.3 AudioSystem::getInputForAttr() — Policy 输入路由决策
+
+```cpp
+// frameworks/av/media/libaudioclient/AudioSystem.cpp
+// 这是一个跨进程 Binder 调用, 最终到达 AudioPolicyService
+
+// AudioPolicyManager 侧的处理:
+// frameworks/av/services/audiopolicy/managerdefault/AudioPolicyManager.cpp
+status_t AudioPolicyManager::getInputForAttr(const audio_attributes_t *attr,
+                                              audio_io_handle_t *input,
+                                              audio_session_t session,
+                                              audio_devices_t *selectedDeviceId, ...) {
+    // 1. AudioSource → 输入设备
+    //    VOICE_COMMUNICATION → 底部 MIC (支持 AEC 参考信号)
+    //    CAMCORDER → 多麦阵列 (方向性增强)
+    //    HOTWORD → 低功耗 DSP 通路 (LPI)
+    audio_devices_t device = getDeviceForInputSource(attr->source);
+    
+    // 2. 检查并发录音冲突
+    //    如果已有 VOICE_COMMUNICATION 在录音, 新的 MIC 请求可能被静音
+    status_t status = checkConcurrentCapture(session, attr->source);
+    
+    // 3. 设备 + source + format → 选择最佳 input (对应 RecordThread)
+    *input = getInputForDevice(device, session, attr->source,
+                               config->sample_rate, config->format,
+                               config->channel_mask, flags);
+    
+    // 4. 如果没有现成 input → 打开新的 HAL inputStream
+    //    内部: AudioFlinger::openInput() → HAL openInputStream()
+    
+    // 5. 创建 AudioPatch (输入设备 → MixPort 连接)
+    addAudioPatch(patchHandle, inputDevice, mixPort);
+    
+    return NO_ERROR;
+}
+```
+
+**input 句柄 (audio_io_handle_t) 的本质：**
+```
+audio_io_handle_t 是一个整数 ID, 对应 AudioFlinger 中的一个 RecordThread。
+每个 RecordThread 绑定一个 HAL 输入流 (StreamIn):
+
+  input=1 → RecordThread (primary_input, Built-In Mic, 48kHz)
+  input=2 → RecordThread (voice_call_input, Modem Voice RX)
+  input=3 → RecordThread (usb_input, USB Mic, 96kHz)
+  input=4 → RecordThread (mmap_input, MMAP low-latency)
+
+同一物理设备通常只有一个 input (不同于 output 可有多种 flags)
+多个 App 录同一个 input 时, 共享 RecordThread (多 RecordTrack)
+```
+
+### 3.4 AudioFlinger::openRecord() — 资源分配
+
+```cpp
+// frameworks/av/services/audioflinger/AudioFlinger.cpp
+sp<IAudioRecord> AudioFlinger::openRecord(const media::OpenRecordRequest& request,
+                                           media::OpenRecordResponse* response,
+                                           status_t *status) {
+    // 1. 查找目标 RecordThread
+    RecordThread *thread = checkRecordThread_l(input);
+    if (thread == nullptr) {
+        *status = BAD_VALUE;  // input 不存在
+        return nullptr;
+    }
+    
+    // 2. 在 Thread 中创建 RecordTrack
+    sp<RecordThread::RecordTrack> recordTrack;
+    recordTrack = thread->createRecordTrack_l(client, attr,
+                                              &sampleRate, format, channelMask,
+                                              &frameCount, sessionId,
+                                              &notificationFrameCount, flags, ...);
+    
+    // 3. 填充输出参数 (告诉 Client 实际分配了什么)
+    response->inputId = thread->id();
+    response->sampleRate = thread->sampleRate();  // HAL 实际采样率
+    response->frameCount = frameCount;             // 实际分配的 buffer 大小
+    
+    // 4. 检查是否需要加载前处理 Effect
+    //    如果 source=VOICE_COMMUNICATION, 且 session 匹配:
+    //    AudioPolicyService 已预先指定了 AEC/NS effect → 此处绑定到 RecordTrack
+    
+    // 5. 返回 Binder 接口 (RecordHandle 包装 RecordTrack)
+    recordHandle = new RecordHandle(recordTrack);
+    return recordHandle;
+}
+```
+
+### 3.5 共享内存分配与 cblk 初始化
+
+```cpp
+// frameworks/av/services/audioflinger/TrackBase.cpp
+// 与 AudioTrack 共用同一基类 TrackBase, 共享内存分配逻辑完全一致
+AudioFlinger::TrackBase::TrackBase(..., size_t bufferSize) {
+    size_t size = sizeof(audio_track_cblk_t);  // 控制块 (~64 bytes)
+    size_t bufferOffset = size;                  // 数据区紧跟控制块之后
+    size += bufferSize;                          // 总共享内存 = cblk + data buffer
+    
+    // 1. 分配匿名共享内存 (ashmem)
+    mCblkMemory = client->allocator().allocate(size);
+    // allocator 内部: ashmem_create_region("AudioRecord", size)
+    //   → /dev/ashmem 创建匿名共享内存区域
+    //   → mmap 映射到当前进程 (audioserver)
+    
+    // 2. 获取 cblk 指针 (共享内存起始位置)
+    void *iMem = mCblkMemory->unsecurePointer();
+    mCblk = static_cast<audio_track_cblk_t*>(iMem);
+    
+    // 3. placement new 初始化控制块
+    new (mCblk) audio_track_cblk_t();
+    
+    // 4. 数据区指针 (紧跟 cblk 之后)
+    mBuffer = (char*)mCblk + bufferOffset;
+    // 此区域是环形缓冲区的 backing memory
+}
+```
+
+**录音场景下 cblk 的角色反转：**
+```
+与 AudioTrack 的关键差异 — 生产者/消费者角色互换:
+
+  AudioTrack (播放):
+    Producer = App (AudioTrackClientProxy, 写入 PCM)
+    Consumer = AudioFlinger (AudioTrackServerProxy, 读取送 HAL)
+    
+  AudioRecord (录音):
+    Producer = AudioFlinger (AudioRecordServerProxy, 从 HAL 读取写入)
+    Consumer = App (AudioRecordClientProxy, 调用 read() 消费)
+
+cblk 控制块结构相同 (audio_track_cblk_t), 但:
+  mFront: 由 Consumer 更新 (录音时是 App 侧)
+  mRear:  由 Producer 更新 (录音时是 Server 侧)
+  available = mRear - mFront (App 可读的帧数)
+  
+  Overrun 条件: mRear - mFront >= frameCount
+    → Server 写满了, App 还没读 → 旧数据被覆盖 → 丢帧
+```
+
+### 3.6 重采样决策 (Resampler)
+
+```cpp
+// frameworks/av/services/audioflinger/Threads.cpp
+// RecordThread::createRecordTrack_l() 中判断是否需要重采样
+
+bool needsResampling = (sampleRate != thread->sampleRate());
+// 例: App 请求 16kHz, 但 HAL input 实际运行在 48kHz → 需要重采样 (下采样)
+
+// 与 AudioTrack 的差异:
+//   AudioTrack: 重采样在 AudioMixer (MixerThread) 中执行
+//   AudioRecord: 重采样在 RecordThread 中执行 (每个 RecordTrack 独立重采样)
+
+// RecordThread::threadLoop() 中:
+if (recordTrack->needsResampler()) {
+    // 使用 ResamplerBufferProvider:
+    //   HAL 以 48kHz 采集 → 重采样为 App 请求的 16kHz
+    //   下采样比例 = 48000/16000 = 3:1
+    //   使用多相滤波器 (Polyphase), 先低通滤波再抽取
+    recordTrack->mResampler->resample(
+        recordTrack->mSink.raw, framesOut, recordTrack->mResamplerBufferProvider);
+}
+
+// 多 RecordTrack 共享同一 RecordThread 时:
+//   Track A: 需要 16kHz → 独立 Resampler 实例 (48→16)
+//   Track B: 需要 48kHz → 无需重采样, 直接拷贝
+//   Track C: 需要 44100Hz → 独立 Resampler 实例 (48→44.1)
+```
+
+### 3.7 Client 侧代理初始化 (回到 Client 进程)
+
+```cpp
+// AudioRecord::openRecord_l() 后半段 (Binder 返回后)
+status_t AudioRecord::openRecord_l(size_t epoch, const String16& opPackageName) {
+    // ... getInputForAttr / openRecord 完成后 ...
+    
+    // 1. 从 RecordHandle 获取共享内存的 fd (通过 Binder 传递)
+    sp<IMemory> iMem = record->getCblk();
+    // 内部: Binder 传递了 ashmem fd → Client 进程 mmap 同一块物理内存
+    
+    // 2. 获取 cblk 和 buffer 指针 (Client 视角)
+    mCblk = static_cast<audio_track_cblk_t*>(iMem->unsecurePointer());
+    mBuffers = record->getBuffers();  // 数据区起始地址
+    
+    // 3. 创建 Client 侧 Proxy (注意：录音是 Consumer)
+    mProxy = new AudioRecordClientProxy(mCblk, mBuffers, mFrameCount, mFrameSize);
+    // AudioRecordClientProxy 继承自 ClientProxy
+    // 核心方法: obtainBuffer() — 等待 Server 写入数据后获取可读区域
+    //           releaseBuffer() — 更新 mFront 读指针
+    
+    // 4. 设置 epoch (位置基准, 用于 getPosition)
+    mProxy->setEpoch(epoch);
+    
+    // 5. 记录 AF 侧参数
+    mAfSampleRate = response.sampleRate;    // HAL 实际采样率
+    mAfFrameCount = response.frameCount;    // AF 侧 buffer 大小
+    mNotificationFramesAct = response.notificationFrameCount;
+    
+    return NO_ERROR;
+}
+```
+
+### 3.8 初始化完整时序图
+
+```mermaid
+sequenceDiagram
+    participant App as App Process
+    participant AR as AudioRecord (Client)
+    participant APS as AudioPolicyService
+    participant AF as AudioFlinger
+    participant Thread as RecordThread
+    
+    App->>AR: new AudioRecord() / set()
+    AR->>AR: 校验参数, 计算 frameSize/frameCount
+    AR->>APS: getInputForAttr(source, format, sampleRate)
+    APS->>APS: Source→Device→Input 匹配
+    APS->>APS: 并发录音冲突检查
+    APS-->>AR: input handle (如 input=1)
+    
+    AR->>AF: openRecord(input, format, frameCount, sessionId)
+    AF->>AF: checkRecordThread_l(input)
+    AF->>Thread: createRecordTrack_l(client, params)
+    Thread->>Thread: new RecordTrack() → 分配 ashmem (cblk + buffer)
+    Thread->>Thread: 检查/绑定前处理 Effect (AEC/NS)
+    Thread-->>AF: RecordTrack 对象
+    AF-->>AR: RecordHandle (Binder proxy) + 共享内存 fd
+    
+    AR->>AR: mmap 共享内存到 Client 地址空间
+    AR->>AR: new AudioRecordClientProxy(cblk, buffers)
+    AR-->>App: AudioRecord 就绪 (STATE_INITIALIZED)
+    
+    Note over App,Thread: 此时 RecordTrack 已创建但未激活
+    Note over App,Thread: 调用 startRecording() 后加入 mActiveTracks
+    Note over App,Thread: RecordThread 开始 HAL read() 循环
 ```
 
 ---
